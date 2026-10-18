@@ -1,0 +1,14 @@
+{
+  "name": "personal-creation-studio-static",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "나의 창작실 정적판: 서버·로그인 없이 브라우저에 저장하고 Cloudflare Pages 등 정적 호스팅에 배포",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node tools/serve.mjs",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

@@ -1,0 +1,1586 @@
+// 나의 창작실 - 프런트엔드 진입점 (외부 의존성 없음)
+import { h, clear, uid, formatBytes, formatDate, formatTime, downloadBlob, safeFileName, deepClone, byteLength, isHexColor } from './dom.js';
+import { icon, brandMark } from './icons.js';
+import { studioApi, assetUrl } from './api.js';
+import { renderStory, MAX_SCRIPT, MAX_SCENES } from './story.js';
+import { renderEditor, makeLayer, forgetImage, RATIOS, MAX_LAYERS, MAX_IMAGE_LAYERS } from './canvas-editor.js';
+import { renderPromptLab } from './promptlab.js';
+import { openSketchPad } from './sketch.js';
+import { renderDetailPage } from './detail-page.js';
+import { createAiController } from './ai-settings.js';
+import { FEATURE_TOOLS, renderFeatureStudio } from './feature-studio.js';
+import { renderStudioHome } from './studio-home.js';
+
+const TYPE_LABELS = { travel: '여행', story: '이야기', image: '이미지', product: '상세페이지', other: '기타' };
+const TYPES = Object.keys(TYPE_LABELS);
+const ALLOWED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
+const MAX_UPLOAD = 10 * 1024 * 1024;
+const MAX_IMPORT = 64 * 1024 * 1024;
+const MAX_STATE_BYTES = 256 * 1024;
+const MAX_NOTES = 20000;
+const DEFAULT_STATE = {
+  story: { script: '', scenes: [], characters: [] },
+  editor: { width: 1280, height: 720, background: '#e8e3d8', baseAssetId: null, fit: 'cover', textLayers: [], imageLayers: [] },
+  promptLab: { picks: {}, subject: '', negative: '', ratio: '16:9', depth: 'auto', seed: null, characterIds: [] },
+  detailPage: {
+    productAssetIds: [], modelAssetId: null, extraInfo: '', reviewSummary: '',
+    settings: { template: 'basic', count: 7, lang: '한국어', ratio: 'portrait', style: '미니멀', mode: 'edit', model: 'none', tone: '' },
+    plan: null,
+  },
+  featureStudio: {},
+  notes: '',
+};
+const DP = {
+  templates: ['basic', 'objection', 'proof', 'scenario', 'story', 'mobile'],
+  langs: ['한국어', '영어', '일본어'],
+  ratios: ['portrait', 'square', 'landscape'],
+  styles: ['미니멀', '모던', '프리미엄', '인스타감성', '내추럴', '테크', '레트로', '팝아트'],
+  modes: ['edit', 'baked'],
+  models: ['none', 'some', 'hero'],
+  types: ['hero', 'problem', 'solution', 'feature', 'detail', 'usage', 'comparison', 'review', 'trust', 'spec', 'composition', 'caution', 'offer', 'custom'],
+  roles: ['label', 'headline', 'subcopy', 'bullets', 'text'],
+  weights: [400, 500, 600, 700, 800, 900],
+  fonts: ['sans', 'serif', 'display', 'round'],
+};
+const MAX_CHARACTERS = 12;
+const PROMPT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3', '3:2'];
+const PROMPT_DEPTHS = ['auto', 'sharp', 'blur'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TABS = [
+  ...FEATURE_TOOLS.map(t => ({ id: t.id, label: t.name, icon: t.icon })),
+  { id: 'story', label: '대본·장면', icon: 'pen' },
+  { id: 'image', label: '이미지·썸네일', icon: 'image' },
+  { id: 'detail', label: '상세페이지', icon: 'layers' },
+  { id: 'prompt', label: '프롬프트·AI', icon: 'leaf' },
+  { id: 'assets', label: '자료', icon: 'folder' },
+  { id: 'info', label: '정보·메모', icon: 'note' },
+];
+
+const S = {
+  status: null,
+  user: null,
+  projects: [],
+  query: '',
+  typeFilter: 'all',
+  cur: null, // { project, draft:{title,description,type,state}, dirty, rev, saving, savedAt, error, conflict }
+  assets: [],
+  tab: 'signature',
+  loadingProject: false,
+  reauthOpen: false,
+};
+
+const appRoot = document.getElementById('app');
+const toastRoot = document.getElementById('toasts');
+const UI = {}; // 작업실 고정 요소 참조
+const aiController = createAiController({
+  getProjectId: () => S.cur?.project.id,
+  getAssets: () => S.assets,
+  addAsset: (asset) => {
+    if (!S.assets.some(a => a.id === asset.id)) S.assets.push(asset);
+    renderTabs();
+  },
+  notify, confirm: confirmDialog, openDialog,
+  onChange: (config) => {
+    if (S.status) S.status.ai = { configured: !!(config?.geminiConfigured || config?.openaiConfigured) };
+    if (UI.aiChip) {
+      const ready = !!(config?.geminiConfigured || config?.openaiConfigured);
+      UI.aiChip.classList.toggle('is-ready', ready);
+      UI.aiChip.querySelector('.chip-text').textContent = ready ? 'AI 키 설정됨' : 'AI 연결 설정';
+      UI.aiChip.title = 'Gemini·OpenAI API 키, 모델, 사용 한도 설정';
+    }
+  },
+});
+
+// ======================================================================
+// 공통: 알림, 대화상자
+// ======================================================================
+function notify(message, kind = 'info') {
+  const el = h('div', { class: `toast toast-${kind}`, role: kind === 'error' ? 'alert' : 'status' },
+    icon(kind === 'error' ? 'alert' : kind === 'success' ? 'check' : 'info', 'icon-sm'),
+    h('p', null, String(message)),
+    h('button', { type: 'button', class: 'icon-btn toast-close', 'aria-label': '알림 닫기', onclick: () => el.remove() }, icon('close', 'icon-sm')),
+  );
+  toastRoot.append(el);
+  while (toastRoot.children.length > 4) toastRoot.firstElementChild.remove();
+  setTimeout(() => el.remove(), kind === 'error' ? 9000 : 4500);
+}
+
+/**
+ * 접근성 있는 모달. actions 는 DOM 순서상 첫 번째가 기본(Enter) 동작이다.
+ * onAction 이 false 를 반환하면 닫지 않는다.
+ */
+function openDialog({ title, message, content, actions, onAction, initialFocus, className = '', hideCancel = false }) {
+  return new Promise((resolve) => {
+    const prev = document.activeElement;
+    const titleId = uid('dlg');
+    const errorBox = h('p', { class: 'form-error', role: 'alert', hidden: true });
+    const btns = actions.map((a) => h('button', {
+      type: 'submit', value: a.value, class: `btn ${a.variant === 'danger' ? 'btn-danger' : a.variant === 'primary' ? 'btn-primary' : a.variant === 'quiet' ? 'btn-quiet' : ''}`,
+    }, a.label));
+    const cancelBtn = h('button', { type: 'button', class: 'btn btn-quiet', onclick: () => done(null) }, '취소');
+    const form = h('form', { class: 'dialog-form', novalidate: true },
+      h('div', { class: 'dialog-head' },
+        h('h2', { id: titleId, class: 'dialog-title' }, title),
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': '닫기', onclick: () => done(null) }, icon('close')),
+      ),
+      message ? h('p', { class: 'dialog-msg' }, message) : null,
+      content || null,
+      errorBox,
+      h('div', { class: `dialog-actions${actions.length > 2 ? ' is-column' : ''}` }, ...btns, hideCancel ? null : cancelBtn),
+    );
+    const dlg = h('dialog', { class: `dialog ${className}`, 'aria-labelledby': titleId }, form);
+    let finished = false;
+    function done(value) {
+      if (finished) return;
+      finished = true;
+      if (dlg.open) dlg.close();
+      dlg.remove();
+      if (prev && typeof prev.focus === 'function' && document.contains(prev)) prev.focus();
+      resolve(value);
+    }
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const value = (e.submitter && e.submitter.value) || actions[0].value;
+      if (!onAction) return done(value);
+      errorBox.hidden = true;
+      btns.forEach((b) => { b.disabled = true; });
+      try {
+        const r = await onAction(value, form, (msg) => { errorBox.textContent = msg; errorBox.hidden = false; });
+        if (r === false) return;
+        done(r === undefined ? value : r);
+      } finally {
+        btns.forEach((b) => { b.disabled = false; });
+      }
+    });
+    dlg.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
+    document.body.append(dlg);
+    dlg.showModal();
+    const focusEl = initialFocus ? form.querySelector(initialFocus) : btns[0];
+    (focusEl || btns[0]).focus();
+  });
+}
+
+function confirmDialog({ title, message, okLabel = '확인', danger = false }) {
+  return openDialog({ title, message, actions: [{ value: 'ok', label: okLabel, variant: danger ? 'danger' : 'primary' }] })
+    .then((v) => v === 'ok');
+}
+
+function choose({ title, message, choices }) {
+  return openDialog({ title, message, actions: choices.map((c, i) => ({ ...c, variant: c.variant || (i === 0 ? 'primary' : '') })) });
+}
+
+function aiBlocked(feature) {
+  const configured = !!(S.status && S.status.ai && S.status.ai.configured);
+  openDialog({
+    title: 'AI 미연결',
+    content: h('div', { class: 'stack' },
+      h('p', null, `"${feature}" 기능은 아직 연결되지 않았습니다.`),
+      h('p', null, '이 버튼은 요청을 보내지 않았고, 생성 결과·유료 호출·결제도 발생하지 않았습니다.'),
+      h('p', { class: 'muted' }, configured
+        ? '이 기능은 현재 AI 연결 대상에 포함되지 않았습니다. 지원되는 문구·이미지 기능을 이용해 주세요.'
+        : '상단 AI 연결 설정에서 API 키를 등록해 주세요. 수동 편집·로컬 분할·PNG 출력은 키 없이도 그대로 쓸 수 있습니다.'),
+    ),
+    actions: [{ value: 'ok', label: '알겠습니다', variant: 'primary' }],
+    hideCancel: true,
+  });
+}
+
+function handleError(err, prefix = '') {
+  if (err && err.status === 401 && S.user) {
+    reauth();
+    return;
+  }
+  notify(`${prefix}${err && err.message ? err.message : '알 수 없는 오류가 발생했습니다.'}`, 'error');
+}
+
+// ======================================================================
+// 상태 정규화 / 검증
+// ======================================================================
+const str = (v, max = 100000) => (typeof v === 'string' ? v : v == null ? '' : String(v)).slice(0, max);
+const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+/** #rgb → #rrggbb (색 선택 입력은 6자리만 받음) */
+function hex6(v, fallback) {
+  if (typeof v === 'string' && /^#[0-9a-fA-F]{3}$/.test(v)) return ('#' + v.slice(1).split('').map((c) => c + c).join('')).toLowerCase();
+  return isHexColor(v) ? v.toLowerCase() : fallback;
+}
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function normalizeState(raw) {
+  const base = deepClone(DEFAULT_STATE);
+  const src = raw && typeof raw === 'object' ? deepClone(raw) : {};
+  const out = { ...base, ...src };
+  const story = src.story && typeof src.story === 'object' ? src.story : {};
+  out.story = { ...base.story, ...story };
+  out.story.script = str(out.story.script);
+  const assetRef = (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null);
+  const seenChar = new Set();
+  out.story.characters = (Array.isArray(story.characters) ? story.characters : [])
+    .filter((c) => c && typeof c === 'object')
+    .slice(0, MAX_CHARACTERS)
+    .map((c) => {
+      const id = typeof c.id === 'string' && ID_RE.test(c.id) && !seenChar.has(c.id) ? c.id : uid('char');
+      seenChar.add(id);
+      return {
+        id,
+        name: str(c.name, 60).replace(/[\r\n\t]+/g, ' '),
+        look: str(c.look, 1000),
+        assetId: assetRef(c.assetId),
+      };
+    });
+  const charIds = (list) => [...new Set((Array.isArray(list) ? list : []).filter((id) => seenChar.has(id)))];
+  out.story.scenes = (Array.isArray(story.scenes) ? story.scenes : [])
+    .filter((s) => s && typeof s === 'object')
+    .map((s, i) => ({
+      ...s,
+      id: typeof s.id === 'string' && ID_RE.test(s.id) ? s.id : uid('scene'),
+      title: str(s.title) || `장면 ${i + 1}`,
+      narration: str(s.narration),
+      prompt: str(s.prompt),
+      duration: Math.max(0, num(s.duration, 0)),
+      imagePrompt: str(s.imagePrompt, 4000),
+      assetId: assetRef(s.assetId),
+      characterIds: charIds(s.characterIds),
+    }));
+  const ed = src.editor && typeof src.editor === 'object' ? src.editor : {};
+  out.editor = { ...base.editor, ...ed };
+  const ratio = RATIOS.find((r) => r.w === Number(ed.width) && r.h === Number(ed.height));
+  out.editor.width = ratio ? ratio.w : 1280;
+  out.editor.height = ratio ? ratio.h : 720;
+  out.editor.background = hex6(ed.background, base.editor.background);
+  out.editor.fit = ed.fit === 'contain' ? 'contain' : 'cover';
+  out.editor.baseAssetId = typeof ed.baseAssetId === 'string' && ed.baseAssetId ? ed.baseAssetId : null;
+  out.editor.textLayers = (Array.isArray(ed.textLayers) ? ed.textLayers : [])
+    .filter((l) => l && typeof l === 'object')
+    .map((l) => ({
+      ...l,
+      id: typeof l.id === 'string' && ID_RE.test(l.id) ? l.id : uid('layer'),
+      text: str(l.text, 500),
+      x: num(l.x, 100),
+      y: num(l.y, 100),
+      fontSize: Math.min(400, Math.max(8, num(l.fontSize, 64))),
+      color: hex6(l.color, '#24221e'),
+      fontFamily: typeof l.fontFamily === 'string' && /^[A-Za-z0-9 ,'"_-]{1,80}$/.test(l.fontFamily) ? l.fontFamily : 'sans-serif',
+      align: ['left', 'center', 'right'].includes(l.align) ? l.align : 'left',
+      shadow: !!l.shadow,
+      strokeColor: hex6(l.strokeColor, '#000000'),
+      strokeWidth: Math.min(60, Math.max(0, num(l.strokeWidth, 0))),
+    }));
+  out.editor.imageLayers = (Array.isArray(ed.imageLayers) ? ed.imageLayers : [])
+    .filter((l) => l && typeof l === 'object' && assetRef(l.assetId))
+    .slice(0, MAX_IMAGE_LAYERS)
+    .map((l) => ({
+      id: typeof l.id === 'string' && ID_RE.test(l.id) ? l.id : uid('img'),
+      assetId: l.assetId,
+      x: num(l.x, 0),
+      y: num(l.y, 0),
+      w: Math.max(8, num(l.w, 400)),
+      h: Math.max(8, num(l.h, 400)),
+      opacity: Math.min(1, Math.max(0, num(l.opacity, 1))),
+    }));
+  const pl = src.promptLab && typeof src.promptLab === 'object' ? src.promptLab : {};
+  const picks = {};
+  if (pl.picks && typeof pl.picks === 'object' && !Array.isArray(pl.picks)) {
+    for (const [k, v] of Object.entries(pl.picks).slice(0, 24)) {
+      if (!ID_RE.test(k) || !Array.isArray(v)) continue;
+      picks[k] = [...new Set(v.filter((x) => typeof x === 'string' && ID_RE.test(x)))].slice(0, 16);
+    }
+  }
+  const seed = Number(pl.seed);
+  out.promptLab = {
+    picks,
+    subject: str(pl.subject, 4000),
+    negative: str(pl.negative, 2000),
+    ratio: PROMPT_RATIOS.includes(pl.ratio) ? pl.ratio : '16:9',
+    depth: PROMPT_DEPTHS.includes(pl.depth) ? pl.depth : 'auto',
+    seed: pl.seed !== null && pl.seed !== undefined && Number.isInteger(seed) && seed >= 0 && seed <= 2147483647 ? seed : null,
+    characterIds: charIds(pl.characterIds),
+  };
+  out.detailPage = normalizeDetailPage(src.detailPage, assetRef);
+  out.notes = str(src.notes);
+  return out;
+}
+
+function normalizeDetailPage(raw, assetRef) {
+  const base = deepClone(DEFAULT_STATE.detailPage);
+  const dp = raw && typeof raw === 'object' ? raw : {};
+  const pick = (v, list, d) => (list.includes(v) ? v : d);
+  const clampN = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+  const oneLine = (v, max) => str(v, max).replace(/[\r\n\t]+/g, ' ');
+  const hex = (v, d) => (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : d);
+  base.productAssetIds = [...new Set((Array.isArray(dp.productAssetIds) ? dp.productAssetIds : []).map(assetRef).filter(Boolean))].slice(0, 8);
+  base.modelAssetId = assetRef(dp.modelAssetId);
+  base.extraInfo = str(dp.extraInfo, 4000);
+  base.reviewSummary = str(dp.reviewSummary, 8000);
+  const s = dp.settings && typeof dp.settings === 'object' ? dp.settings : {};
+  base.settings = {
+    template: pick(s.template, DP.templates, 'basic'),
+    count: Math.round(clampN(s.count, 3, 12, 7)),
+    lang: pick(s.lang, DP.langs, '한국어'),
+    ratio: pick(s.ratio, DP.ratios, 'portrait'),
+    style: pick(s.style, DP.styles, '미니멀'),
+    mode: pick(s.mode, DP.modes, 'edit'),
+    model: pick(s.model, DP.models, 'none'),
+    tone: str(s.tone, 1000),
+  };
+  const p = dp.plan && typeof dp.plan === 'object' ? dp.plan : null;
+  if (p) {
+    const seen = new Set();
+    base.plan = {
+      productName: oneLine(p.productName, 120),
+      summary: str(p.summary, 500),
+      palette: (Array.isArray(p.palette) ? p.palette : []).map((c) => hex(c, null)).filter(Boolean).slice(0, 3),
+      sections: (Array.isArray(p.sections) ? p.sections : []).filter((x) => x && typeof x === 'object').slice(0, 16).map((sec) => {
+        let id = typeof sec.id === 'string' && ID_RE.test(sec.id) && !seen.has(sec.id) ? sec.id : uid('sec');
+        seen.add(id);
+        const seenL = new Set();
+        return {
+          id,
+          type: pick(sec.type, DP.types, 'custom'),
+          label: oneLine(sec.label, 40),
+          headline: str(sec.headline, 200),
+          subcopy: str(sec.subcopy, 1000),
+          bullets: (Array.isArray(sec.bullets) ? sec.bullets : []).map((b) => oneLine(b, 200)).filter((b) => b.trim()).slice(0, 8),
+          visual: str(sec.visual, 2000),
+          useModel: !!sec.useModel,
+          assetId: assetRef(sec.assetId),
+          bg: hex(sec.bg, '#efece6'),
+          layers: (Array.isArray(sec.layers) ? sec.layers : []).filter((l) => l && typeof l === 'object').slice(0, 12).map((l) => {
+            const lid = typeof l.id === 'string' && ID_RE.test(l.id) && !seenL.has(l.id) ? l.id : uid('lay');
+            seenL.add(lid);
+            return {
+              id: lid,
+              role: pick(l.role, DP.roles, 'text'),
+              text: str(l.text, 2000),
+              visible: l.visible === undefined ? true : !!l.visible,
+              x: clampN(l.x, 0, 1, 0.5),
+              y: clampN(l.y, -0.1, 1.2, 0.1),
+              size: clampN(l.size, 10, 240, 40),
+              weight: DP.weights.includes(Number(l.weight)) ? Number(l.weight) : 700,
+              font: pick(l.font, DP.fonts, 'sans'),
+              color: hex(l.color, '#16181d'),
+              align: pick(l.align, ['left', 'center', 'right'], 'center'),
+              lineHeight: clampN(l.lineHeight, 0.8, 3, 1.35),
+              maxW: clampN(l.maxW, 0.1, 1, 0.86),
+              shadow: !!l.shadow,
+              bg: !!l.bg,
+              bgColor: hex(l.bgColor, '#ffffff'),
+              bgOpacity: clampN(l.bgOpacity, 0, 1, 0.85),
+            };
+          }),
+        };
+      }),
+    };
+  }
+  return base;
+}
+
+function validateDraft(d) {
+  const title = d.title.trim();
+  if (!title) return '작업 제목을 입력해 주세요.';
+  if (title.length > 120) return '작업 제목은 120자 이하로 입력해 주세요.';
+  if (d.description.length > 2000) return '설명은 2,000자 이하로 입력해 주세요.';
+  if (d.state.story.script.length > MAX_SCRIPT) return `대본은 ${MAX_SCRIPT.toLocaleString('ko-KR')}자 이하만 저장할 수 있습니다.`;
+  if (d.state.story.scenes.length > MAX_SCENES) return `장면은 최대 ${MAX_SCENES}개까지 저장할 수 있습니다.`;
+  if (d.state.editor.textLayers.length > MAX_LAYERS) return `문구 레이어는 최대 ${MAX_LAYERS}개까지 저장할 수 있습니다.`;
+  if (d.state.editor.imageLayers.length > MAX_IMAGE_LAYERS) return `이미지 레이어는 최대 ${MAX_IMAGE_LAYERS}개까지 저장할 수 있습니다.`;
+  if (d.state.story.characters.length > MAX_CHARACTERS) return `등장인물은 최대 ${MAX_CHARACTERS}명까지 저장할 수 있습니다.`;
+  const bytes = byteLength(JSON.stringify(d.state));
+  if (bytes > MAX_STATE_BYTES) return `작업 데이터가 너무 큽니다 (${formatBytes(bytes)} / 최대 256 KB). 대본이나 메모를 줄여 주세요.`;
+  return '';
+}
+
+function makeCur(project) {
+  return {
+    project,
+    draft: {
+      title: str(project.title, 120),
+      description: str(project.description, 2000),
+      type: TYPES.includes(project.type) ? project.type : 'other',
+      state: normalizeState(project.state),
+    },
+    dirty: false,
+    rev: 0,
+    saving: false,
+    savedAt: null,
+    error: '',
+    conflict: false,
+  };
+}
+
+// ======================================================================
+// 부팅 (로그인 없음: 이 브라우저의 저장소를 사용한다)
+// ======================================================================
+async function boot() {
+  clear(appRoot);
+  appRoot.append(h('div', { class: 'boot' }, brandMark(), h('p', null, '작업실을 여는 중…')));
+  try {
+    S.status = await studioApi.status();
+  } catch (err) {
+    renderFatal(err);
+    return;
+  }
+  S.user = S.status.user;
+  enterWorkspace();
+}
+
+function renderFatal(err) {
+  clear(appRoot);
+  appRoot.append(h('main', { class: 'auth-wrap' },
+    h('section', { class: 'auth-card' },
+      h('div', { class: 'auth-brand' }, brandMark(), h('span', null, '나의 창작실')),
+      h('h1', { class: 'auth-title' }, '이 브라우저의 저장소를 열 수 없습니다'),
+      h('p', { class: 'form-error', role: 'alert' }, err && err.message ? err.message : '알 수 없는 오류'),
+      h('p', { class: 'muted' }, '비공개(시크릿) 창이거나 사이트 데이터 저장을 막아 둔 경우 작업을 저장할 수 없습니다. 일반 창에서 열거나 브라우저의 사이트 데이터 설정을 확인해 주세요.'),
+      h('button', { type: 'button', class: 'btn btn-primary', onclick: boot }, '다시 시도'),
+    ),
+  ));
+}
+
+/** 로그인이 없으므로 세션 만료는 일어나지 않는다. 저장소 접근 오류만 안내한다. */
+function reauth() {
+  notify('브라우저 저장소에 접근하지 못했습니다. 페이지를 새로고침해 주세요.', 'error');
+}
+
+function enterWorkspace() {
+  clear(appRoot);
+  S.cur = null;
+  S.assets = [];
+
+  UI.menuBtn = h('button', { type: 'button', class: 'icon-btn menu-btn', 'aria-label': '작업 목록 열기', 'aria-expanded': 'false', 'aria-controls': 'library', onclick: toggleDrawer }, icon('menu'));
+  UI.saveStatus = h('button', { type: 'button', class: 'save-status', hidden: true, onclick: onStatusClick, onmousedown: keepFocus, 'aria-live': 'polite' });
+  UI.userBtn = h('button', { type: 'button', class: 'user-chip', onclick: openSettings, 'aria-label': '설정' });
+  UI.aiChip = h('button', { type: 'button', class: 'chip chip-off ai-connect-chip', onclick: () => aiController.open(), 'aria-label': 'AI 연결 설정' }, icon('plug', 'icon-sm'), h('span', { class: 'chip-text' }, 'AI 연결 설정'));
+  const topbar = h('header', { class: 'topbar' },
+    UI.menuBtn,
+    h('div', { class: 'brand' }, brandMark(), h('span', { class: 'brand-name' }, '나의 창작실')),
+    h('div', { class: 'topbar-spacer' }),
+    UI.saveStatus,
+    UI.aiChip,
+    h('button', { type: 'button', class: 'icon-btn topbar-settings', 'aria-label': '설정', onclick: openSettings }, icon('settings')),
+    UI.userBtn,
+  );
+
+  // 사이드바
+  UI.search = h('input', { id: 'project-search', class: 'input search-input', type: 'search', placeholder: '제목·설명 검색', autocomplete: 'off' });
+  UI.search.addEventListener('input', () => { S.query = UI.search.value; renderProjectList(); });
+  UI.filters = h('div', { class: 'filter-row', role: 'group', 'aria-label': '종류로 거르기' });
+  UI.list = h('ul', { class: 'project-list', 'aria-label': '작업 목록' });
+  const importInput = h('input', { type: 'file', id: 'import-file', class: 'sr-only', accept: '.json,application/json' });
+  importInput.addEventListener('change', () => {
+    const f = importInput.files && importInput.files[0];
+    importInput.value = '';
+    if (f) importBackup(f);
+  });
+  UI.library = h('aside', { id: 'library', class: 'library', 'aria-label': '작업 목록' },
+    h('button', { type: 'button', class: 'studio-home-link', onclick: closeProject }, icon('scenes', 'icon-sm'), '창작 도구 전체 보기'),
+    h('h2', { class: 'studio-nav-title' }, '창작 도구'),
+    UI.toolNav = h('nav', { class: 'studio-tool-nav', 'aria-label': '창작 도구' }, ...FEATURE_TOOLS.map(t => h('button', { type: 'button', class: 'studio-tool-link', 'data-tool': t.id, onclick: () => launchTool(t.id) }, icon(t.icon, 'icon-sm'), h('span', null, t.name)))),
+    h('h2', { class: 'studio-nav-title' }, '추가 기능'),
+    h('button', { type: 'button', class: 'studio-tool-link studio-detail-link', 'data-tool': 'detail', onclick: () => launchTool('detail') }, icon('layers', 'icon-sm'), '상세페이지 제작', h('span', { class: 'studio-additional' }, '유지')),
+    h('div', { class: 'lib-head' },
+      h('h2', { class: 'lib-title' }, '내 작업 목록'),
+      h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: newProjectDialog }, icon('plus', 'icon-sm'), h('span', null, '새 작업')),
+    ),
+    h('div', { class: 'search-box' },
+      h('label', { class: 'sr-only', htmlFor: 'project-search' }, '작업 검색'),
+      icon('search', 'icon-sm search-icon'),
+      UI.search,
+    ),
+    UI.filters,
+    UI.list,
+    h('div', { class: 'lib-foot' },
+      importInput,
+      h('button', { type: 'button', class: 'btn btn-quiet btn-sm btn-block', onclick: () => importInput.click() }, icon('importIcon', 'icon-sm'), h('span', null, '백업 파일 가져오기')),
+      h('p', { class: 'lib-note' }, icon('server', 'icon-sm'), h('span', null, '이 브라우저에 저장 · 다른 기기는 백업 파일로 옮기기')),
+    ),
+  );
+  UI.scrim = h('div', { class: 'scrim', onclick: closeDrawer });
+  UI.main = h('main', { id: 'main', class: 'main', tabIndex: -1 });
+
+  appRoot.append(
+    h('a', { class: 'skip-link', href: '#main' }, '본문으로 건너뛰기'),
+    h('div', { class: 'shell' }, topbar, h('div', { class: 'body' }, UI.library, UI.scrim, UI.main)),
+  );
+  renderTopbarUser();
+  aiController.reset();
+  aiController.refresh().catch(err => handleError(err, 'AI 설정을 확인하지 못했습니다: '));
+  renderFilters();
+  renderMain();
+  loadProjects().then(() => {
+    const m = /^#\/p\/(.+)$/.exec(location.hash);
+    if (m) openProject(decodeURIComponent(m[1]), { fromHash: true });
+  });
+}
+
+function renderTopbarUser() {
+  if (!UI.userBtn) return;
+  clear(UI.userBtn);
+  const name = (S.user && S.user.name) || '나';
+  UI.userBtn.append(h('span', { class: 'avatar', 'aria-hidden': 'true' }, Array.from(name)[0] || '나'), h('span', { class: 'user-name' }, name));
+}
+
+function toggleDrawer() {
+  const open = !document.body.classList.contains('drawer-open');
+  document.body.classList.toggle('drawer-open', open);
+  UI.menuBtn.setAttribute('aria-expanded', String(open));
+  if (open) UI.search.focus();
+}
+function closeDrawer() {
+  if (!document.body.classList.contains('drawer-open')) return;
+  document.body.classList.remove('drawer-open');
+  UI.menuBtn.setAttribute('aria-expanded', 'false');
+}
+
+function renderFilters() {
+  clear(UI.filters);
+  const opts = [['all', '전체'], ...TYPES.map((t) => [t, TYPE_LABELS[t]])];
+  for (const [val, label] of opts) {
+    UI.filters.append(h('button', {
+      type: 'button', class: 'filter-chip', 'aria-pressed': String(S.typeFilter === val),
+      onclick: () => { S.typeFilter = val; renderFilters(); renderProjectList(); },
+    }, label));
+  }
+}
+
+async function loadProjects() {
+  try {
+    const res = await studioApi.listProjects();
+    S.projects = Array.isArray(res.projects) ? res.projects : [];
+  } catch (err) {
+    handleError(err, '작업 목록을 불러오지 못했습니다: ');
+  }
+  renderProjectList();
+  if (!S.cur) renderMain();
+}
+
+function sortedProjects() {
+  return S.projects.slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+}
+
+function renderProjectList() {
+  if (!UI.list) return;
+  clear(UI.list);
+  const q = S.query.trim().toLowerCase();
+  const items = sortedProjects().filter((p) => {
+    if (S.typeFilter !== 'all' && p.type !== S.typeFilter) return false;
+    if (!q) return true;
+    const title = S.cur && S.cur.project.id === p.id ? S.cur.draft.title : p.title;
+    return `${title || ''} ${p.description || ''}`.toLowerCase().includes(q);
+  });
+  if (!S.projects.length) {
+    UI.list.append(h('li', { class: 'list-empty' }, '아직 작업이 없습니다. "새 작업"으로 시작해 보세요.'));
+    return;
+  }
+  if (!items.length) {
+    UI.list.append(h('li', { class: 'list-empty' }, '조건에 맞는 작업이 없습니다.'));
+    return;
+  }
+  for (const p of items) {
+    const active = S.cur && S.cur.project.id === p.id;
+    const title = active ? S.cur.draft.title : p.title;
+    const type = active ? S.cur.draft.type : p.type;
+    UI.list.append(h('li', null,
+      h('button', {
+        type: 'button', class: `project-item${active ? ' is-active' : ''}`, 'aria-current': active ? 'true' : null,
+        onclick: () => openProject(p.id),
+      },
+      h('span', { class: `type-dot t-${TYPES.includes(type) ? type : 'other'}`, 'aria-hidden': 'true' }),
+      h('span', { class: 'pi-main' },
+        h('span', { class: 'pi-title' }, title || '제목 없음'),
+        h('span', { class: 'pi-meta' },
+          TYPE_LABELS[type] || '기타', ' · ', formatDate(p.updatedAt),
+          Number.isFinite(p.assetCount) ? ` · 자료 ${p.assetCount}` : ''),
+      ),
+      active && S.cur.dirty ? h('span', { class: 'dirty-dot' }, h('span', { class: 'sr-only' }, '저장 안 된 변경 있음')) : null,
+      ),
+    ));
+  }
+}
+
+function updateProjectInList(project) {
+  const i = S.projects.findIndex((p) => p.id === project.id);
+  const lite = { ...project };
+  delete lite.state;
+  if (i >= 0) S.projects[i] = { ...S.projects[i], ...lite };
+  else S.projects.unshift(lite);
+  renderProjectList();
+}
+
+// ======================================================================
+// 저장 상태 / 저장
+// ======================================================================
+/**
+ * 버튼의 아이콘·문구를 제자리에서 갱신한다. 자식 노드를 매번 새로 만들면
+ * 입력칸 blur(change) → markDirty → 재렌더가 mousedown~mouseup 사이에 일어날 때
+ * 클릭 대상이 사라져 click 이 발생하지 않는다. 자식은 pointer-events:none 으로 두어
+ * 포인터 대상이 항상 버튼 자신이 되도록 한다.
+ */
+function setButtonContent(btn, iconName, text) {
+  if (!btn.dataset.icon) clear(btn);
+  let svg = btn.querySelector(':scope > svg');
+  if (!svg || btn.dataset.icon !== iconName) {
+    const fresh = icon(iconName, 'icon-sm');
+    fresh.style.pointerEvents = 'none';
+    if (svg) svg.replaceWith(fresh); else btn.prepend(fresh);
+    btn.dataset.icon = iconName;
+  }
+  let label = btn.querySelector(':scope > span[data-role="label"]');
+  if (!label) {
+    label = h('span', { 'data-role': 'label' });
+    label.style.pointerEvents = 'none';
+    btn.append(label);
+  }
+  if (label.textContent !== text) label.textContent = text;
+}
+
+function renderSaveStatus() {
+  const el = UI.saveStatus;
+  if (!el) return;
+  const cur = S.cur;
+  if (!cur) { el.hidden = true; return; }
+  el.hidden = false;
+  let cls = 'is-saved', text = '이 브라우저에 저장됨', ic = 'check';
+  if (cur.saving) { cls = 'is-saving'; text = '저장 중…'; ic = 'save'; }
+  else if (cur.conflict) { cls = 'is-error'; text = '충돌 · 확인 필요'; ic = 'alert'; }
+  else if (cur.error) { cls = 'is-error'; text = '저장 실패 · 다시 시도'; ic = 'alert'; }
+  else if (cur.dirty) { cls = 'is-dirty'; text = '저장 안 된 변경'; ic = 'pen'; }
+  else if (cur.savedAt) { text = `저장됨 · ${formatTime(cur.savedAt)}`; }
+  const nextClass = `save-status ${cls}`;
+  if (el.className !== nextClass) el.className = nextClass;
+  setButtonContent(el, ic, text);
+  el.title = cur.dirty || cur.error || cur.conflict ? '눌러서 저장 (Ctrl+S)' : '이 브라우저에 저장된 상태';
+  if (UI.saveBtn) {
+    UI.saveBtn.disabled = cur.saving;
+    setButtonContent(UI.saveBtn, 'save', cur.saving ? '저장 중…' : cur.dirty ? '저장' : '저장됨');
+    UI.saveBtn.classList.toggle('btn-primary', cur.dirty || !!cur.error || cur.conflict);
+  }
+}
+
+/**
+ * 저장 버튼을 누를 때 입력칸에서 포커스를 빼앗지 않는다. 포커스가 빠지면 change →
+ * 상태 문구 변경 → 버튼 크기 변화가 mousedown~mouseup 사이에 일어나 click 이 빠질 수 있다.
+ * 확정되지 않은 값은 save() 의 commitActiveField() 가 반영한다.
+ */
+function keepFocus(e) {
+  if (e.button === 0) e.preventDefault();
+}
+
+/** 포커스된 입력칸의 change 를 즉시 발생시켜(숫자 X/Y 등) 저장 전에 상태에 반영한다. */
+function commitActiveField() {
+  const el = document.activeElement;
+  if (!el || !(el instanceof HTMLInputElement || el instanceof HTMLSelectElement)) return;
+  if (el instanceof HTMLInputElement && ['button', 'submit', 'checkbox', 'radio', 'file', 'range', 'color'].includes(el.type)) return;
+  el.blur(); // 브라우저가 값이 바뀐 경우에만 change 를 보낸다
+  el.focus({ preventScroll: true });
+}
+
+function onStatusClick() {
+  if (!S.cur) return;
+  commitActiveField();
+  if (S.cur.conflict) openConflictDialog();
+  else if (S.cur.dirty || S.cur.error) save();
+}
+
+function markDirty() {
+  const cur = S.cur;
+  if (!cur) return;
+  const was = cur.dirty;
+  cur.dirty = true;
+  cur.rev += 1;
+  cur.error = '';
+  renderSaveStatus();
+  if (!was) renderProjectList();
+}
+
+async function save({ force = false } = {}) {
+  const cur = S.cur;
+  if (!cur || cur.saving) return false;
+  commitActiveField();
+  if (cur.conflict && !force) { openConflictDialog(); return false; }
+  if (!cur.dirty && !force) { notify('이미 이 브라우저에 저장된 상태입니다.', 'info'); return true; }
+  const problem = validateDraft(cur.draft);
+  if (problem) { cur.error = problem; renderSaveStatus(); notify(problem, 'error'); return false; }
+  cur.saving = true;
+  cur.error = '';
+  renderSaveStatus();
+  const rev = cur.rev;
+  const d = cur.draft;
+  try {
+    const res = await studioApi.patchProject(cur.project.id, {
+      version: cur.project.version,
+      title: d.title.trim(),
+      description: d.description,
+      type: d.type,
+      state: d.state,
+    });
+    if (S.cur !== cur) return true;
+    cur.project = { ...cur.project, ...res.project };
+    cur.savedAt = new Date();
+    cur.conflict = false;
+    if (cur.rev === rev) cur.dirty = false;
+    updateProjectInList(res.project);
+    renderProjectMeta();
+    return true;
+  } catch (err) {
+    if (S.cur !== cur) return false;
+    if (err.code === 'VERSION_CONFLICT' || (err.status === 409 && !err.code)) {
+      cur.conflict = true;
+      openConflictDialog();
+    } else if (err.status === 401) {
+      cur.error = err.message;
+      reauth();
+    } else {
+      cur.error = err.message;
+      notify(`저장하지 못했습니다. ${err.message}`, 'error');
+    }
+    return false;
+  } finally {
+    cur.saving = false;
+    renderSaveStatus();
+  }
+}
+
+async function openConflictDialog() {
+  const cur = S.cur;
+  if (!cur || cur.conflictOpen) return;
+  cur.conflictOpen = true;
+  let latest = null;
+  try {
+    latest = (await studioApi.getProject(cur.project.id)).project;
+  } catch (err) {
+    if (err.status === 404) {
+      cur.conflictOpen = false;
+      const again = await choose({
+        title: '다른 탭에서 이 작업이 삭제되었습니다',
+        message: '다른 창이나 기기에서 삭제된 것 같습니다. 화면에 남은 내용을 새 작업으로 저장할 수 있습니다.',
+        choices: [{ value: 'copy', label: '새 작업으로 저장' }],
+      });
+      if (again === 'copy') saveAsCopy(cur);
+      return;
+    }
+  }
+  const info = latest
+    ? h('dl', { class: 'meta-list' },
+      h('dt', null, '저장된 최신본'), h('dd', null, `${latest.title || '제목 없음'} · 버전 ${latest.version}`),
+      h('dt', null, '마지막 저장'), h('dd', null, formatDate(latest.updatedAt) || '알 수 없음'),
+      h('dt', null, '내 화면 기준'), h('dd', null, `버전 ${cur.project.version} 에서 수정함`))
+    : h('p', { class: 'muted' }, '저장된 최신본 정보를 가져오지 못했습니다.');
+  const choice = await openDialog({
+    title: '다른 곳에서 먼저 저장했습니다',
+    message: '다른 창이나 기기에서 이 작업이 바뀌었습니다. 내 변경은 아직 화면에 그대로 있으며, 자동으로 덮어쓰지 않았습니다.',
+    content: info,
+    className: 'dialog-wide',
+    actions: [
+      { value: 'copy', label: '내 변경을 새 작업으로 따로 저장', variant: 'primary' },
+      { value: 'load', label: '저장된 최신본 불러오기 (내 변경 버림)' },
+      { value: 'overwrite', label: '내 변경으로 덮어쓰기', variant: 'danger' },
+    ],
+  });
+  cur.conflictOpen = false;
+  if (S.cur !== cur || !choice) { renderSaveStatus(); return; }
+  if (choice === 'copy') {
+    await saveAsCopy(cur);
+  } else if (choice === 'load') {
+    const ok = await confirmDialog({ title: '내 변경 버리기', message: '화면에서 저장하지 않은 변경이 사라지고 저장된 최신본으로 바뀝니다. 계속할까요?', okLabel: '최신본 불러오기', danger: true });
+    if (!ok) return;
+    try {
+      const fresh = (await studioApi.getProject(cur.project.id)).project;
+      S.cur = makeCur(fresh);
+      S.cur.savedAt = new Date();
+      updateProjectInList(fresh);
+      renderMain();
+      notify('저장된 최신본을 불러왔습니다.', 'success');
+    } catch (err) { handleError(err, '최신본을 불러오지 못했습니다: '); }
+  } else if (choice === 'overwrite') {
+    const ok = await confirmDialog({ title: '정말 덮어쓸까요?', message: '다른 곳에서 저장한 내용이 내 화면의 내용으로 바뀝니다. 되돌릴 수 없습니다.', okLabel: '덮어쓰기', danger: true });
+    if (!ok) return;
+    try {
+      const fresh = (await studioApi.getProject(cur.project.id)).project;
+      cur.project.version = fresh.version;
+      cur.conflict = false;
+      if (await save({ force: true })) notify('내 변경으로 덮어썼습니다.', 'success');
+    } catch (err) { handleError(err, '덮어쓰지 못했습니다: '); }
+  }
+}
+
+async function saveAsCopy(cur) {
+  const d = cur.draft;
+  try {
+    const created = (await studioApi.createProject({
+      title: `${d.title.trim() || '제목 없음'} (내 변경본)`.slice(0, 120),
+      description: d.description,
+      type: d.type,
+    })).project;
+    const state = deepClone(d.state);
+    // 자료는 작업마다 따로 보관되므로 다른 작업의 이미지 연결은 풀어 둔다.
+    state.editor.baseAssetId = null;
+    state.editor.imageLayers = [];
+    for (const c of state.story.characters) c.assetId = null;
+    for (const s of state.story.scenes) s.assetId = null;
+    state.detailPage.productAssetIds = [];
+    state.detailPage.modelAssetId = null;
+    if (state.detailPage.plan) for (const s of state.detailPage.plan.sections) s.assetId = null;
+    const saved = (await studioApi.patchProject(created.id, { version: created.version, state })).project;
+    updateProjectInList(saved);
+    S.cur = makeCur(saved);
+    S.cur.savedAt = new Date();
+    S.assets = [];
+    S.tab = saved.type === 'product' ? 'detail' : 'story';
+    setHash(saved.id);
+    renderMain();
+    renderProjectList();
+    notify('내 변경을 새 작업으로 저장했습니다. 이미지 연결(배경·레이어·인물·장면)은 원래 작업에 남아 있습니다.', 'success');
+  } catch (err) {
+    handleError(err, '새 작업으로 저장하지 못했습니다: ');
+  }
+}
+
+/** 저장되지 않은 변경이 있을 때 이동 전에 묻는다. true 면 진행. */
+async function confirmLeave(actionLabel = '이동') {
+  if (!S.cur || !S.cur.dirty) return true;
+  const v = await choose({
+    title: '저장하지 않은 변경이 있습니다',
+    message: `"${S.cur.draft.title || '제목 없음'}"의 변경 내용이 아직 이 브라우저에 저장되지 않았습니다.`,
+    choices: [
+      { value: 'save', label: `저장하고 ${actionLabel}` },
+      { value: 'discard', label: `저장하지 않고 ${actionLabel}`, variant: 'danger' },
+    ],
+  });
+  if (v === 'save') return save();
+  return v === 'discard';
+}
+
+function setHash(id) {
+  const target = id ? `#/p/${encodeURIComponent(id)}` : ' ';
+  history.replaceState(null, '', id ? target : location.pathname + location.search);
+}
+
+// ======================================================================
+// 프로젝트 열기 / 만들기 / 삭제
+// ======================================================================
+async function openProject(id, { fromHash = false } = {}) {
+  if (S.cur && S.cur.project.id === id) { closeDrawer(); return; }
+  if (S.loadingProject) return;
+  if (!fromHash && !(await confirmLeave())) return;
+  S.loadingProject = true;
+  clear(UI.main).append(h('div', { class: 'main-loading', role: 'status' }, '작업을 불러오는 중…'));
+  closeDrawer();
+  try {
+    const [p, a] = await Promise.all([studioApi.getProject(id), studioApi.listAssets(id)]);
+    S.cur = makeCur(p.project);
+    S.assets = Array.isArray(a.assets) ? a.assets : [];
+    S.tab = p.project.state?.featureStudio?.activeTool || (p.project.type === 'product' ? 'detail' : p.project.type === 'story' || p.project.type === 'travel' ? 'storyboard' : 'signature');
+    setHash(id);
+  } catch (err) {
+    S.cur = null;
+    S.assets = [];
+    setHash(null);
+    handleError(err, '작업을 열지 못했습니다: ');
+  } finally {
+    S.loadingProject = false;
+  }
+  renderMain();
+  renderProjectList();
+  renderSaveStatus();
+  if (S.cur) UI.main.focus({ preventScroll: true });
+}
+
+async function closeProject() {
+  if (!(await confirmLeave('닫기'))) return;
+  S.cur = null;
+  S.assets = [];
+  setHash(null);
+  renderMain();
+  renderProjectList();
+  renderSaveStatus();
+}
+
+async function newProjectDialog() {
+  if (!(await confirmLeave())) return;
+  const title = h('input', { id: 'np-title', class: 'input', maxLength: 120, required: true, placeholder: '새 창작 작업 제목' });
+  const type = h('select', { id: 'np-type', class: 'input' }, ...FEATURE_TOOLS.map(t => h('option', { value: t.id, selected: S.tab === t.id }, t.name)), h('option', { value: 'detail', selected: S.tab === 'detail' }, '상세페이지 제작 (추가 기능)'));
+  const desc = h('textarea', { id: 'np-desc', class: 'input', rows: 3, maxLength: 2000, placeholder: '어떤 작업인지 짧게 (선택)' });
+  await openDialog({
+    title: '새 작업 만들기',
+    content: h('div', { class: 'stack' },
+      h('div', { class: 'field' }, h('label', { htmlFor: 'np-title' }, '제목'), title),
+      h('div', { class: 'field' }, h('label', { htmlFor: 'np-type' }, '시작할 기능'), type),
+      h('div', { class: 'field' }, h('label', { htmlFor: 'np-desc' }, '설명'), desc),
+    ),
+    initialFocus: '#np-title',
+    actions: [{ value: 'create', label: '만들기', variant: 'primary' }],
+    onAction: async (_v, _f, showError) => {
+      const t = title.value.trim();
+      if (!t) { showError('제목을 입력해 주세요.'); title.focus(); return false; }
+      try {
+        const res = await studioApi.createProject({ title: t, description: desc.value.trim(), type: type.value === 'detail' ? 'product' : type.value === 'storyboard' ? 'story' : 'image' });
+        await afterCreate(res.project);
+        switchTab(type.value);
+        if (S.cur?.dirty) await save();
+        return 'ok';
+      } catch (err) {
+        if (err.status === 401) { reauth(); return 'ok'; }
+        showError(err.message);
+        return false;
+      }
+    },
+  });
+}
+
+async function afterCreate(project) {
+  updateProjectInList(project);
+  S.cur = null;
+  await openProject(project.id, { fromHash: true });
+  notify('새 작업을 만들었습니다.', 'success');
+}
+
+async function deleteProject(id = S.cur?.project.id) {
+  const cur = S.cur?.project.id === id ? S.cur : null;
+  const project = cur?.project || S.projects.find((p) => p.id === id);
+  if (!project) return;
+  if (cur?.saving) { notify('저장이 끝난 뒤 다시 삭제해 주세요.', 'info'); return; }
+  const title = cur ? cur.draft.title : project.title;
+  const deleted = await openDialog({
+    title: '작업 삭제',
+    message: `"${title || '제목 없음'}" 작업과 이 작업에 올린 자료 이미지가 이 브라우저에서 영구 삭제됩니다. 최근 목록에서만 숨기는 기능이 아니며, 되돌릴 수 없습니다. 필요하면 먼저 작업을 열어 백업을 내려받으세요.`,
+    initialFocus: '.dialog-actions > button[type="button"]',
+    actions: [{ value: 'delete', label: '영구 삭제', variant: 'danger' }],
+    onAction: async (_value, form, showError) => {
+      // 요청 중에는 중복 삭제와 취소로 인한 결과 혼동을 막는다.
+      const dialog = form.closest('dialog');
+      const lockCancel = (event) => event.preventDefault();
+      const cancelButtons = [...form.querySelectorAll('button[type="button"]')];
+      cancelButtons.forEach((button) => { button.disabled = true; });
+      dialog.addEventListener('cancel', lockCancel);
+      form.setAttribute('aria-busy', 'true');
+      try {
+        await studioApi.deleteProject(id);
+        S.projects = S.projects.filter((p) => p.id !== id);
+        if (S.cur?.project.id === id) {
+          S.assets.forEach((a) => forgetImage(a.id));
+          S.cur = null;
+          S.assets = [];
+          setHash(null);
+        }
+        if (!S.cur) renderMain();
+        renderProjectList();
+        renderSaveStatus();
+        return 'deleted';
+      } catch (err) {
+        showError(`삭제하지 못했습니다: ${err.message || '저장소에 접근하지 못했습니다.'}`);
+        return false;
+      } finally {
+        cancelButtons.forEach((button) => { button.disabled = false; });
+        dialog.removeEventListener('cancel', lockCancel);
+        form.removeAttribute('aria-busy');
+      }
+    },
+  });
+  if (deleted === 'deleted') notify('작업을 삭제했습니다.', 'success');
+}
+
+// ======================================================================
+// 백업 내보내기 / 가져오기
+// ======================================================================
+async function exportProject() {
+  const cur = S.cur;
+  if (!cur) return;
+  if (cur.dirty) {
+    const v = await choose({
+      title: '저장하지 않은 변경이 있습니다',
+      message: '백업은 이 브라우저에 저장된 내용으로 만들어집니다. 저장하지 않은 변경은 포함되지 않습니다.',
+      choices: [{ value: 'save', label: '저장하고 내보내기' }, { value: 'as-is', label: '저장된 내용만 내보내기' }],
+    });
+    if (!v) return;
+    if (v === 'save' && !(await save())) return;
+  }
+  notify('백업 파일을 만드는 중입니다…', 'info');
+  try {
+    const res = await studioApi.exportProject(cur.project.id);
+    const blob = await res.blob();
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadBlob(blob, `${safeFileName(cur.draft.title)}-백업-${stamp}.json`);
+    notify(`백업 파일(${formatBytes(blob.size)})을 내려받았습니다. 원본 이미지가 포함되어 있으니 안전한 곳에 보관하세요.`, 'success');
+  } catch (err) {
+    handleError(err, '백업을 만들지 못했습니다: ');
+  }
+}
+
+async function importBackup(file) {
+  if (file.size > MAX_IMPORT) { notify('백업 파일이 너무 큽니다. 최대 64MB까지 가져올 수 있습니다.', 'error'); return; }
+  let text;
+  try { text = await file.text(); } catch { notify('파일을 읽지 못했습니다.', 'error'); return; }
+  let data;
+  try { data = JSON.parse(text); } catch { notify('JSON 형식이 아닙니다. 나의 창작실에서 내보낸 백업 파일인지 확인해 주세요.', 'error'); return; }
+  if (!data || data.format !== 'personal-studio-backup' || !data.project || typeof data.project !== 'object') {
+    notify('나의 창작실 백업 파일 형식이 아닙니다.', 'error');
+    return;
+  }
+  const n = Array.isArray(data.assets) ? data.assets.length : 0;
+  const ok = await confirmDialog({
+    title: '백업 가져오기',
+    message: `"${str(data.project.title, 120) || '제목 없음'}" 백업을 새 작업으로 추가합니다 (이미지 ${n}개). 기존 작업은 바뀌지 않습니다.`,
+    okLabel: '새 작업으로 가져오기',
+  });
+  if (!ok) return;
+  if (!(await confirmLeave())) return;
+  notify('가져오는 중입니다…', 'info');
+  try {
+    const res = await studioApi.importBackup(text);
+    S.cur = null;
+    await afterCreateImport(res.project);
+  } catch (err) {
+    handleError(err, '가져오지 못했습니다: ');
+  }
+}
+
+async function afterCreateImport(project) {
+  updateProjectInList(project);
+  await openProject(project.id, { fromHash: true });
+  notify('백업을 새 작업으로 가져왔습니다.', 'success');
+  loadProjects();
+}
+
+// ======================================================================
+// 자료 (이미지 업로드)
+// ======================================================================
+function readBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = String(r.result || '');
+      const i = s.indexOf(',');
+      resolve(i >= 0 ? s.slice(i + 1) : '');
+    };
+    r.onerror = () => reject(new Error('파일을 읽지 못했습니다.'));
+    r.readAsDataURL(file);
+  });
+}
+
+function trimName(name) {
+  const n = String(name || 'image').replace(/[\u0000-\u001f]/g, '').trim() || 'image';
+  if (n.length <= 120) return n;
+  const dot = n.lastIndexOf('.');
+  const ext = dot > 0 && n.length - dot <= 6 ? n.slice(dot) : '';
+  return n.slice(0, 120 - ext.length) + ext;
+}
+
+async function uploadFiles(files) {
+  const cur = S.cur;
+  if (!cur) return [];
+  const created = [];
+  const list = Array.from(files);
+  for (let i = 0; i < list.length; i++) {
+    const f = list[i];
+    if (!ALLOWED_MIME.includes(f.type)) { notify(`"${f.name}": PNG, JPEG, WebP 이미지만 올릴 수 있습니다.`, 'error'); continue; }
+    if (f.size > MAX_UPLOAD) { notify(`"${f.name}": 파일당 최대 10MB까지 올릴 수 있습니다.`, 'error'); continue; }
+    if (!f.size) { notify(`"${f.name}": 빈 파일입니다.`, 'error'); continue; }
+    setUploadProgress(`올리는 중 ${i + 1}/${list.length} · ${f.name}`);
+    try {
+      const data = await readBase64(f);
+      const res = await studioApi.uploadAsset(cur.project.id, trimName(f.name), f.type, data);
+      if (S.cur === cur && res.asset) { S.assets.push(res.asset); created.push(res.asset); }
+    } catch (err) {
+      handleError(err, `"${f.name}" 올리기 실패: `);
+      if (err.status === 401) break;
+    }
+  }
+  setUploadProgress('');
+  syncAssetCount(cur);
+  if (created.length) notify(`이미지 ${created.length}개를 자료함에 올렸습니다.`, 'success');
+  renderTabs();
+  if (S.tab === 'assets') renderTab();
+  return created;
+}
+
+async function uploadBlob(blob, name) {
+  if (!blob) return null;
+  const type = ALLOWED_MIME.includes(blob.type) ? blob.type : 'image/png';
+  const file = new File([blob], name || 'image.png', { type });
+  const created = await uploadFiles([file]);
+  return created[0] || null;
+}
+
+/** 이 자료를 쓰는 곳 목록(한국어 설명). */
+function assetUsage(state, assetId) {
+  const out = [];
+  if (state.editor.baseAssetId === assetId) out.push('캔버스 배경');
+  const layers = state.editor.imageLayers.filter((l) => l.assetId === assetId).length;
+  if (layers) out.push(`이미지 레이어 ${layers}개`);
+  const chars = state.story.characters.filter((c) => c.assetId === assetId).length;
+  if (chars) out.push(`등장인물 ${chars}명`);
+  const scenes = state.story.scenes.filter((s) => s.assetId === assetId).length;
+  if (scenes) out.push(`장면 ${scenes}개`);
+  if (JSON.stringify(state.featureStudio || {}).includes(assetId)) out.push('창작 도구 입력·결과 이미지');
+  const dp = state.detailPage;
+  if (dp.productAssetIds.includes(assetId)) out.push('상세페이지 제품 이미지');
+  if (dp.modelAssetId === assetId) out.push('상세페이지 모델');
+  const dsec = dp.plan ? dp.plan.sections.filter((s) => s.assetId === assetId).length : 0;
+  if (dsec) out.push(`상세 섹션 ${dsec}개`);
+  return out;
+}
+
+function clearAssetRefs(state, assetId) {
+  let changed = false;
+  const cleanFeature = obj => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const [key,value] of Object.entries(obj)) {
+      if (value === assetId && (key === 'assetId' || /AssetId$/.test(key))) { obj[key] = null; changed = true; }
+      else if (Array.isArray(value) && /(?:refIds|assetIds)$/i.test(key)) { const next = value.filter(id => id !== assetId); if (next.length !== value.length) { obj[key] = next; changed = true; } }
+      else if (value && typeof value === 'object') cleanFeature(value);
+    }
+  };
+  cleanFeature(state.featureStudio);
+  if (state.editor.baseAssetId === assetId) { state.editor.baseAssetId = null; changed = true; }
+  const before = state.editor.imageLayers.length;
+  state.editor.imageLayers = state.editor.imageLayers.filter((l) => l.assetId !== assetId);
+  if (state.editor.imageLayers.length !== before) changed = true;
+  for (const c of state.story.characters) if (c.assetId === assetId) { c.assetId = null; changed = true; }
+  for (const s of state.story.scenes) if (s.assetId === assetId) { s.assetId = null; changed = true; }
+  const dp = state.detailPage;
+  if (dp.productAssetIds.includes(assetId)) { dp.productAssetIds = dp.productAssetIds.filter((id) => id !== assetId); changed = true; }
+  if (dp.modelAssetId === assetId) { dp.modelAssetId = null; changed = true; }
+  if (dp.plan) for (const s of dp.plan.sections) if (s.assetId === assetId) { s.assetId = null; changed = true; }
+  return changed;
+}
+
+function syncAssetCount(cur) {
+  if (!cur || S.cur !== cur) return;
+  const p = S.projects.find((x) => x.id === cur.project.id);
+  if (p && 'assetCount' in p) { p.assetCount = S.assets.length; renderProjectList(); }
+}
+
+function setUploadProgress(text) {
+  const el = document.getElementById('upload-progress');
+  if (el) { el.textContent = text; el.hidden = !text; }
+}
+
+async function deleteAsset(asset) {
+  const cur = S.cur;
+  const usage = cur ? assetUsage(cur.draft.state, asset.id) : [];
+  const ok = await confirmDialog({
+    title: '자료 삭제',
+    message: `"${asset.name || '이미지'}"를 이 브라우저에서 삭제할까요?${usage.length ? ` 사용 중인 곳(${usage.join(', ')})에서도 빠집니다.` : ''} 되돌릴 수 없습니다.`,
+    okLabel: '삭제',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await studioApi.deleteAsset(asset.id);
+    if (S.cur !== cur) return;
+    S.assets = S.assets.filter((a) => a.id !== asset.id);
+    forgetImage(asset.id);
+    syncAssetCount(cur);
+    if (clearAssetRefs(cur.draft.state, asset.id)) {
+      markDirty();
+      notify('자료를 삭제하고 사용 중이던 곳에서도 뺐습니다. 저장을 눌러 반영하세요.', 'info');
+    } else {
+      notify('자료를 삭제했습니다.', 'success');
+    }
+    renderTabs();
+    renderTab();
+  } catch (err) {
+    handleError(err, '자료를 삭제하지 못했습니다: ');
+  }
+}
+
+function renderAssets(root) {
+  clear(root);
+  const cur = S.cur;
+  const input = h('input', { type: 'file', id: 'asset-upload', class: 'sr-only', multiple: true, accept: 'image/png,image/jpeg,image/webp' });
+  input.addEventListener('change', () => {
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (files.length) uploadFiles(files);
+  });
+  const zone = h('div', { class: 'drop-zone' },
+    icon('upload', 'icon-lg'),
+    h('p', null, h('strong', null, '이미지를 여기로 끌어 놓거나'), ' '),
+    input,
+    h('label', { htmlFor: 'asset-upload', class: 'btn btn-primary file-btn', tabIndex: 0, role: 'button',
+      onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } } },
+    icon('upload', 'icon-sm'), h('span', null, '파일 고르기')),
+    h('p', { class: 'hint' }, 'PNG · JPEG · WebP, 파일당 최대 10MB. 이 브라우저에 보관됩니다. AI 참조로 선택하면 동의 후 Google·OpenAI로 직접 전송됩니다.'),
+    h('p', { id: 'upload-progress', class: 'upload-progress', role: 'status', hidden: true }),
+  );
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('is-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('is-over'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('is-over');
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length) uploadFiles(files);
+  });
+
+  const sketchBtn = h('button', { type: 'button', class: 'btn', onclick: async () => {
+    const ed = cur.draft.state.editor;
+    const asset = await openSketchPad({ width: ed.width, height: ed.height, background: '#ffffff', baseImage: null, uploadBlob, notify, title: '스케치 그리기' });
+    if (asset && S.cur === cur) renderTab();
+  } }, icon('pen', 'icon-sm'), h('span', null, '스케치 그리기'));
+  const grid = h('ul', { class: 'asset-grid', 'aria-label': '올린 자료' });
+  if (!S.assets.length) {
+    grid.append(h('li', { class: 'empty-note' }, icon('image', 'icon-lg'), h('p', null, '아직 올린 자료가 없습니다.'), h('p', { class: 'muted' }, '여행 사진이나 그림을 올리면 캔버스 배경으로 쓸 수 있습니다.')));
+  }
+  for (const a of S.assets) {
+    const usage = assetUsage(cur.draft.state, a.id);
+    const inUse = cur.draft.state.editor.baseAssetId === a.id;
+    const url = assetUrl(a);
+    const img = h('img', { src: url, alt: a.name || '자료 이미지', loading: 'lazy', decoding: 'async' });
+    img.addEventListener('error', () => { img.replaceWith(h('div', { class: 'thumb-missing' }, icon('alert'), h('span', null, '미리보기 불가'))); });
+    grid.append(h('li', { class: `asset-card${inUse ? ' in-use' : ''}` },
+      h('div', { class: 'thumb' }, img, usage.length ? h('span', { class: 'badge badge-on', title: usage.join(', ') }, `사용 중 · ${usage[0]}${usage.length > 1 ? ` 외 ${usage.length - 1}` : ''}`) : null),
+      h('div', { class: 'asset-info' },
+        h('p', { class: 'asset-name', title: a.name || '' }, a.name || '이름 없음'),
+        h('p', { class: 'asset-meta' }, `${formatBytes(a.size)} · ${String(a.mime || '').replace('image/', '').toUpperCase()}${a.createdAt ? ` · ${formatDate(a.createdAt)}` : ''}`),
+      ),
+      h('div', { class: 'asset-actions' },
+        h('button', { type: 'button', class: 'btn btn-sm', disabled: inUse, onclick: () => {
+          cur.draft.state.editor.baseAssetId = a.id;
+          markDirty();
+          switchTab('image');
+          notify('캔버스 배경으로 지정했습니다. 저장을 눌러 보관하세요.', 'info');
+        } }, icon('image', 'icon-sm'), h('span', null, '캔버스 배경')),
+        h('button', { type: 'button', class: 'btn btn-sm btn-quiet', onclick: () => addAssetAsLayer(cur, a) }, icon('layers', 'icon-sm'), h('span', null, '레이어로')),
+        h('a', { class: 'icon-btn', href: url, download: safeFileName(a.name, 'image'), 'aria-label': `${a.name || '이미지'} 내려받기`, title: '원본 내려받기' }, icon('download')),
+        h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `${a.name || '이미지'} 삭제`, onclick: () => deleteAsset(a) }, icon('trash')),
+      ),
+    ));
+  }
+
+  root.append(h('div', { class: 'assets-wrap' },
+    h('section', { class: 'panel', 'aria-labelledby': 'assets-heading' },
+      h('div', { class: 'panel-head' },
+        h('h2', { id: 'assets-heading', class: 'panel-title' }, icon('folder'), '자료함'),
+        h('span', { class: 'counter' }, `${S.assets.length}개 · ${formatBytes(S.assets.reduce((s, a) => s + (Number(a.size) || 0), 0))}`),
+      ),
+      zone,
+      h('div', { class: 'btn-row assets-tools' }, sketchBtn,
+        h('p', { class: 'hint' }, '스케치는 PNG로 자료함에 저장됩니다. 스케치를 화풍 완성본으로 바꾸는 기능은 AI 연결 후 제공됩니다.')),
+      grid,
+    ),
+  ));
+}
+
+function addAssetAsLayer(cur, asset) {
+  const ed = cur.draft.state.editor;
+  if (ed.imageLayers.length >= MAX_IMAGE_LAYERS) { notify(`이미지 레이어는 최대 ${MAX_IMAGE_LAYERS}개까지 넣을 수 있습니다.`, 'error'); return; }
+  const img = new Image();
+  const finish = (nw, nh) => {
+    const maxW = ed.width * 0.5, maxH = ed.height * 0.5;
+    const ratio = nw && nh ? nw / nh : 1;
+    let w = maxW, hgt = w / ratio;
+    if (hgt > maxH) { hgt = maxH; w = hgt * ratio; }
+    ed.imageLayers.push({ id: uid('img'), assetId: asset.id, x: Math.round((ed.width - w) / 2), y: Math.round((ed.height - hgt) / 2), w: Math.round(w), h: Math.round(hgt), opacity: 1 });
+    markDirty();
+    switchTab('image');
+    notify('이미지 레이어로 추가했습니다. 끌어서 위치와 크기를 조정하세요.', 'success');
+  };
+  img.onload = () => finish(img.naturalWidth, img.naturalHeight);
+  img.onerror = () => finish(1, 1);
+  img.src = assetUrl(asset);
+}
+
+// ======================================================================
+// 정보 · 메모 탭
+// ======================================================================
+function renderInfo(root) {
+  clear(root);
+  const cur = S.cur;
+  const d = cur.draft;
+  const type = h('select', { id: 'info-type', class: 'input' }, ...TYPES.map((t) => h('option', { value: t, selected: d.type === t }, TYPE_LABELS[t])));
+  type.addEventListener('change', () => { d.type = type.value; markDirty(); renderProjectMeta(); renderProjectList(); });
+  const desc = h('textarea', { id: 'info-desc', class: 'input', rows: 3, maxLength: 2000, value: d.description, placeholder: '이 작업에 대한 짧은 설명' });
+  desc.addEventListener('input', () => { d.description = desc.value; markDirty(); });
+  const notes = h('textarea', { id: 'info-notes', class: 'input notes-input', rows: 12, maxLength: MAX_NOTES, value: d.state.notes, placeholder: '아이디어, 할 일, 참고 메모를 자유롭게 적어 두세요.' });
+  notes.addEventListener('input', () => { d.state.notes = notes.value; markDirty(); });
+
+  root.append(h('div', { class: 'info-grid' },
+    h('section', { class: 'panel', 'aria-labelledby': 'notes-heading' },
+      h('h2', { id: 'notes-heading', class: 'panel-title' }, icon('note'), '작업 메모'),
+      h('label', { class: 'sr-only', htmlFor: 'info-notes' }, '작업 메모'),
+      notes,
+    ),
+    h('div', { class: 'stack' },
+      h('section', { class: 'panel', 'aria-labelledby': 'detail-heading' },
+        h('h2', { id: 'detail-heading', class: 'panel-title' }, icon('info'), '작업 정보'),
+        h('div', { class: 'field' }, h('label', { htmlFor: 'info-type' }, '종류'), type),
+        h('div', { class: 'field' }, h('label', { htmlFor: 'info-desc' }, '설명'), desc),
+        h('dl', { class: 'meta-list' },
+          h('dt', null, '만든 날'), h('dd', null, formatDate(cur.project.createdAt) || '-'),
+          h('dt', null, '마지막 저장'), h('dd', null, formatDate(cur.project.updatedAt) || '-'),
+          h('dt', null, '저장 버전'), h('dd', null, String(cur.project.version ?? '-')),
+          h('dt', null, '보관 위치'), h('dd', null, '이 브라우저 (IndexedDB)'),
+        ),
+      ),
+      h('section', { class: 'panel', 'aria-labelledby': 'backup-heading' },
+        h('h2', { id: 'backup-heading', class: 'panel-title' }, icon('exportIcon'), '백업'),
+        h('p', { class: 'muted small-text' }, '작업 내용과 원본 이미지를 JSON 파일 하나로 내려받습니다. AI 키는 들어가지 않습니다. 다른 기기의 나의 창작실에서 "백업 파일 가져오기"로 새 작업으로 불러올 수 있습니다.'),
+        h('button', { type: 'button', class: 'btn', onclick: exportProject }, icon('download', 'icon-sm'), h('span', null, '백업 내려받기')),
+      ),
+      h('section', { class: 'panel danger-zone', 'aria-labelledby': 'danger-heading' },
+        h('h2', { id: 'danger-heading', class: 'panel-title' }, icon('trash'), '작업 삭제'),
+        h('p', { class: 'muted small-text' }, '작업과 자료 이미지가 이 브라우저에서 영구 삭제됩니다.'),
+        h('button', { type: 'button', class: 'btn btn-danger', onclick: () => deleteProject() }, icon('trash', 'icon-sm'), h('span', null, '이 작업 삭제')),
+      ),
+    ),
+  ));
+}
+
+// ======================================================================
+// 본문 렌더링
+// ======================================================================
+function renderMain() {
+  UI.featureCleanup?.(); UI.featureCleanup = null;
+  if (!UI.main) return;
+  updateToolNavigation();
+  clear(UI.main);
+  UI.saveBtn = null;
+  UI.tabbar = null;
+  UI.tabPanel = null;
+  UI.meta = null;
+  if (!S.cur) { renderHome(); renderSaveStatus(); return; }
+  const cur = S.cur;
+
+  const titleInput = h('input', { id: 'project-title', class: 'title-input', value: cur.draft.title, maxLength: 120, placeholder: '작업 제목', autocomplete: 'off' });
+  titleInput.addEventListener('input', () => { cur.draft.title = titleInput.value; markDirty(); renderProjectList(); });
+  UI.meta = h('p', { class: 'ph-meta' });
+  UI.saveBtn = h('button', { type: 'button', class: 'btn', onclick: () => save(), onmousedown: keepFocus, 'aria-keyshortcuts': 'Control+S' });
+
+  const head = h('header', { class: 'project-head' },
+    h('div', { class: 'ph-main' },
+      h('label', { class: 'sr-only', htmlFor: 'project-title' }, '작업 제목'),
+      titleInput,
+      UI.meta,
+    ),
+    h('div', { class: 'ph-actions' },
+      UI.saveBtn,
+      h('button', { type: 'button', class: 'btn btn-quiet', onclick: exportProject, title: '백업 내려받기' }, icon('exportIcon', 'icon-sm'), h('span', { class: 'hide-sm' }, '백업')),
+      h('button', { type: 'button', class: 'icon-btn', onclick: closeProject, 'aria-label': '작업 닫기', title: '작업 닫기' }, icon('close')),
+    ),
+  );
+  UI.tabbar = h('div', { class: 'tabs', role: 'tablist', 'aria-label': '작업 화면' });
+  UI.tabPanel = h('div', { class: 'tab-panel', role: 'tabpanel', id: 'tab-panel', tabIndex: -1 });
+  const top = h('div', { class: 'project-top' }, head, UI.tabbar);
+  UI.main.append(top, UI.tabPanel);
+  if (UI.headObserver) UI.headObserver.disconnect();
+  if ('ResizeObserver' in window) {
+    UI.headObserver = new ResizeObserver(() => UI.main && UI.main.style.setProperty('--head-h', `${Math.ceil(top.getBoundingClientRect().height)}px`));
+    UI.headObserver.observe(top);
+  }
+  renderProjectMeta();
+  renderTabs();
+  renderTab();
+  renderSaveStatus();
+}
+
+function renderProjectMeta() {
+  if (!UI.meta || !S.cur) return;
+  const cur = S.cur;
+  clear(UI.meta).append(
+    h('span', { class: `type-tag t-${cur.draft.type}` }, TYPE_LABELS[cur.draft.type] || '기타'),
+    h('span', null, `저장 ${formatDate(cur.project.updatedAt) || '-'}`),
+    h('span', { class: 'hide-sm' }, `버전 ${cur.project.version ?? '-'}`),
+  );
+}
+
+function renderTabs() {
+  if (!UI.tabbar) return;
+  clear(UI.tabbar);
+  TABS.forEach((t) => {
+    const selected = S.tab === t.id;
+    const label = t.id === 'assets' ? `${t.label} ${S.assets.length}` : t.label;
+    const btn = h('button', {
+      type: 'button', role: 'tab', id: `tab-${t.id}`, class: 'tab', 'aria-selected': String(selected),
+      'aria-controls': 'tab-panel', tabIndex: selected ? 0 : -1, onclick: () => switchTab(t.id),
+    }, icon(t.icon, 'icon-sm'), h('span', null, label));
+    btn.addEventListener('keydown', (e) => {
+      const i = TABS.findIndex((x) => x.id === S.tab);
+      let n = -1;
+      if (e.key === 'ArrowRight') n = (i + 1) % TABS.length;
+      else if (e.key === 'ArrowLeft') n = (i - 1 + TABS.length) % TABS.length;
+      else if (e.key === 'Home') n = 0;
+      else if (e.key === 'End') n = TABS.length - 1;
+      if (n >= 0) {
+        e.preventDefault();
+        switchTab(TABS[n].id);
+        document.getElementById(`tab-${TABS[n].id}`)?.focus();
+      }
+    });
+    UI.tabbar.append(btn);
+  });
+}
+
+function switchTab(id) {
+  if (!S.cur || !TABS.some(t => t.id === id)) return;
+  UI.featureCleanup?.(); UI.featureCleanup = null;
+  S.tab = id;
+  if (FEATURE_TOOLS.some(t => t.id === id) || id === 'detail') {
+    const fs = S.cur.draft.state.featureStudio ||= {};
+    if (fs.activeTool !== id) { fs.activeTool = id; markDirty(); }
+  }
+  updateToolNavigation();
+  renderTabs();
+  renderTab();
+}
+
+function renderTab() {
+  UI.featureCleanup?.(); UI.featureCleanup = null;
+  const panel = UI.tabPanel;
+  if (!panel || !S.cur) return;
+  panel.setAttribute('aria-labelledby', `tab-${S.tab}`);
+  const getState = () => S.cur.draft.state;
+  const ai = aiController;
+  if (FEATURE_TOOLS.some(t => t.id === S.tab)) {
+    UI.featureCleanup = renderFeatureStudio(panel, S.tab, { getState, markDirty, notify, ai, getAssets: () => S.assets, uploadFiles, uploadBlob, confirm: confirmDialog, openSketchPad, switchTab, projectTitle: () => S.cur?.draft.title });
+  } else if (S.tab === 'story') {
+    renderStory(panel, {
+      getState, markDirty, notify, choose, confirm: confirmDialog, aiBlocked, ai,
+      getAssets: () => S.assets, uploadFiles, projectTitle: () => S.cur.draft.title, switchTab,
+      sendToCanvas: (text) => {
+        const ed = S.cur.draft.state.editor;
+        const t = String(text || '').trim();
+        if (!t) { notify('보낼 장면 제목이 비어 있습니다.', 'error'); return; }
+        if (ed.textLayers.length >= MAX_LAYERS) { notify(`문구는 최대 ${MAX_LAYERS}개까지 추가할 수 있습니다.`, 'error'); return; }
+        ed.textLayers.push(makeLayer(ed, t.slice(0, 80)));
+        markDirty();
+        switchTab('image');
+        notify('장면 제목을 캔버스 문구로 추가했습니다.', 'success');
+      },
+    });
+  } else if (S.tab === 'image') {
+    renderEditor(panel, {
+      getState, markDirty, notify, aiBlocked, ai,
+      getAssets: () => S.assets,
+      uploadFiles,
+      uploadBlob,
+      confirm: confirmDialog,
+      projectTitle: () => S.cur.draft.title,
+    });
+  } else if (S.tab === 'detail') {
+    renderDetailPage(panel, {
+      getState, markDirty, notify, aiBlocked, ai, confirm: confirmDialog,
+      getAssets: () => S.assets, uploadFiles, projectTitle: () => S.cur.draft.title, switchTab,
+    });
+  } else if (S.tab === 'prompt') {
+    renderPromptLab(panel, { getState, markDirty, notify, aiBlocked, ai, getAssets: () => S.assets, confirm: confirmDialog, switchTab });
+  } else if (S.tab === 'assets') {
+    renderAssets(panel);
+  } else {
+    renderInfo(panel);
+  }
+}
+
+function renderHome() {
+  renderStudioHome(UI.main, { tools: FEATURE_TOOLS, projects: sortedProjects(), name: S.user?.name || '나', launch: launchTool, openProject, deleteProject, configured: !!S.status?.ai?.configured });
+}
+
+function updateToolNavigation() {
+  document.querySelectorAll('[data-tool]').forEach(el => {
+    const active = !!S.cur && el.dataset.tool === S.tab;
+    el.classList.toggle('is-active', active);
+    if (active) el.setAttribute('aria-current','page'); else el.removeAttribute('aria-current');
+  });
+}
+
+async function launchTool(id) {
+  if (S.cur) { switchTab(id); closeDrawer(); return; }
+  await createToolProject(id);
+}
+
+async function createToolProject(id, title = '') {
+  const tool = FEATURE_TOOLS.find(t => t.id === id);
+  if (!tool && id !== 'detail') return;
+  if (!(await confirmLeave())) return;
+  try {
+    const toolName = tool?.name || '상세페이지 제작';
+    const res = await studioApi.createProject({ title: title.trim() || toolName + ' · ' + new Intl.DateTimeFormat('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date()), type: id === 'detail' ? 'product' : id === 'storyboard' ? 'story' : 'image', description: '' });
+    await afterCreate(res.project);
+    switchTab(id);
+    if (S.cur?.dirty) await save();
+  } catch(err) { handleError(err, '새 작업을 만들지 못했습니다: '); }
+}
+
+// ======================================================================
+// 설정
+// ======================================================================
+function formatMB(n) { return Number.isFinite(n) ? (n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0) + ' MB' : '확인 불가'; }
+
+async function openSettings() {
+  try { S.status = await studioApi.status(); } catch { /* 마지막 상태 사용 */ }
+  const st = S.status || {};
+  const ai = !!(st.ai && st.ai.configured);
+  let info = null;
+  try { info = await (await import('./local-db.js')).getStorageInfo(); } catch { /* 저장소 정보는 선택 항목 */ }
+  const row = (label, value, tone) => h('div', { class: 'set-row' },
+    h('span', { class: 'set-k' }, label),
+    h('span', { class: `set-v${tone ? ` tone-${tone}` : ''}` }, value));
+
+  const content = h('div', { class: 'settings' },
+    h('section', null,
+      h('h3', null, icon('server', 'icon-sm'), '저장 위치'),
+      row('저장 위치', '이 브라우저 (IndexedDB)'),
+      row('영구 보관 요청', info ? (info.persisted ? '허용됨' : '허용되지 않음 · 브라우저가 공간 부족 시 지울 수 있음') : '확인 불가', info && info.persisted ? '' : 'warn'),
+      row('사용 중인 공간', info ? `${formatMB(info.usage)} / 약 ${formatMB(info.quota)}` : '확인 불가'),
+      h('p', { class: 'muted small-text' }, '작업과 이미지는 이 기기의 이 브라우저에만 저장됩니다. 로그인과 서버가 없으므로 다른 기기에는 자동으로 옮겨지지 않습니다. 브라우저의 사이트 데이터를 지우거나 다른 브라우저로 열면 작업이 보이지 않으니 중요한 작업은 백업 파일을 내려받아 보관하세요. 다른 기기에서는 "백업 파일 가져오기"로 불러옵니다.'),
+    ),
+    h('section', null,
+      h('h3', null, icon('plug', 'icon-sm'), 'AI 기능'),
+      row('상태', ai ? 'API 키 저장됨 · 실제 호출 권한은 연결 확인 필요' : 'API 키 미설정', ai ? '' : 'off'),
+      h('p', { class: 'muted small-text' }, 'Gemini로 문구·기획을 만들고 OpenAI로 이미지를 생성합니다. API 키는 이 브라우저에만 저장되며, 사용 요청마다 입력 문구와 선택한 사진이 이 브라우저에서 Google 또는 OpenAI로 직접 전송됩니다. 요청 전에 외부 전송과 API 비용을 확인하며 자동 생성은 하지 않습니다.'),
+    ),
+    h('section', null,
+      h('h3', null, icon('info', 'icon-sm'), '개인정보와 단축키'),
+      h('p', { class: 'muted small-text' }, '이 사이트에는 작업 내용을 받는 서버가 없습니다. 외부 글꼴·분석 도구도 사용하지 않습니다. 공용 PC에서는 사용 후 AI 키를 삭제하세요.'),
+      h('ul', { class: 'kbd-list' },
+        h('li', null, h('kbd', null, 'Ctrl'), '+', h('kbd', null, 'S'), ' 저장 (Mac은 ⌘+S)'),
+        h('li', null, h('kbd', null, '/'), ' 작업 검색'),
+        h('li', null, h('kbd', null, '방향키'), ' 캔버스에서 선택한 문구 이동 (Shift: 10px)'),
+        h('li', null, h('kbd', null, 'Esc'), ' 대화상자 닫기 · 문구 선택 해제'),
+      ),
+    ),
+  );
+  const v = await openDialog({
+    title: '설정 · 상태',
+    content,
+    className: 'dialog-wide',
+    actions: [{ value: 'close', label: '닫기', variant: 'primary' }, { value: 'ai', label: 'AI 연결 설정' }],
+    hideCancel: true,
+  });
+  if (v === 'ai') aiController.open();
+}
+
+// ======================================================================
+// 전역 단축키 / 이탈 방지
+// ======================================================================
+window.addEventListener('beforeunload', (e) => {
+  if (S.cur && (S.cur.dirty || S.cur.saving)) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's') {
+    if (S.cur && !document.querySelector('dialog[open]')) {
+      e.preventDefault();
+      save();
+    }
+    return;
+  }
+  if (e.key === 'Escape' && document.body.classList.contains('drawer-open')) {
+    closeDrawer();
+    UI.menuBtn?.focus();
+    return;
+  }
+  if (e.key === '/' && UI.search && !e.ctrlKey && !e.metaKey) {
+    const t = e.target;
+    const typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+    if (!typing && !document.querySelector('dialog[open]')) {
+      e.preventDefault();
+      if (window.matchMedia('(max-width: 860px)').matches) toggleDrawer();
+      else UI.search.focus();
+    }
+  }
+});
+
+boot();
