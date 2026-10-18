@@ -3,7 +3,9 @@ import { h, clear, uid, formatBytes, formatDate, formatTime, downloadBlob, safeF
 import { icon, brandMark } from './icons.js';
 import { studioApi, assetUrl } from './api.js';
 import { renderStory, MAX_SCRIPT, MAX_SCENES } from './story.js';
-import { renderEditor, makeLayer, forgetImage, RATIOS, MAX_LAYERS } from './canvas-editor.js';
+import { renderEditor, makeLayer, forgetImage, RATIOS, MAX_LAYERS, MAX_IMAGE_LAYERS } from './canvas-editor.js';
+import { renderPromptLab } from './promptlab.js';
+import { openSketchPad } from './sketch.js';
 
 const TYPE_LABELS = { travel: '여행', story: '이야기', image: '이미지', other: '기타' };
 const TYPES = Object.keys(TYPE_LABELS);
@@ -13,13 +15,19 @@ const MAX_IMPORT = 64 * 1024 * 1024;
 const MAX_STATE_BYTES = 256 * 1024;
 const MAX_NOTES = 20000;
 const DEFAULT_STATE = {
-  story: { script: '', scenes: [] },
-  editor: { width: 1280, height: 720, background: '#e8e3d8', baseAssetId: null, fit: 'cover', textLayers: [] },
+  story: { script: '', scenes: [], characters: [] },
+  editor: { width: 1280, height: 720, background: '#e8e3d8', baseAssetId: null, fit: 'cover', textLayers: [], imageLayers: [] },
+  promptLab: { picks: {}, subject: '', negative: '', ratio: '16:9', depth: 'auto', seed: null, characterIds: [] },
   notes: '',
 };
+const MAX_CHARACTERS = 12;
+const PROMPT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3', '3:2'];
+const PROMPT_DEPTHS = ['auto', 'sharp', 'blur'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TABS = [
   { id: 'story', label: '대본·장면', icon: 'pen' },
   { id: 'image', label: '이미지·썸네일', icon: 'image' },
+  { id: 'prompt', label: '프롬프트·AI', icon: 'leaf' },
   { id: 'assets', label: '자료', icon: 'folder' },
   { id: 'info', label: '정보·메모', icon: 'note' },
 ];
@@ -162,6 +170,22 @@ function normalizeState(raw) {
   const story = src.story && typeof src.story === 'object' ? src.story : {};
   out.story = { ...base.story, ...story };
   out.story.script = str(out.story.script);
+  const assetRef = (v) => (typeof v === 'string' && UUID_RE.test(v) ? v : null);
+  const seenChar = new Set();
+  out.story.characters = (Array.isArray(story.characters) ? story.characters : [])
+    .filter((c) => c && typeof c === 'object')
+    .slice(0, MAX_CHARACTERS)
+    .map((c) => {
+      const id = typeof c.id === 'string' && ID_RE.test(c.id) && !seenChar.has(c.id) ? c.id : uid('char');
+      seenChar.add(id);
+      return {
+        id,
+        name: str(c.name, 60).replace(/[\r\n\t]+/g, ' '),
+        look: str(c.look, 1000),
+        assetId: assetRef(c.assetId),
+      };
+    });
+  const charIds = (list) => [...new Set((Array.isArray(list) ? list : []).filter((id) => seenChar.has(id)))];
   out.story.scenes = (Array.isArray(story.scenes) ? story.scenes : [])
     .filter((s) => s && typeof s === 'object')
     .map((s, i) => ({
@@ -171,6 +195,9 @@ function normalizeState(raw) {
       narration: str(s.narration),
       prompt: str(s.prompt),
       duration: Math.max(0, num(s.duration, 0)),
+      imagePrompt: str(s.imagePrompt, 4000),
+      assetId: assetRef(s.assetId),
+      characterIds: charIds(s.characterIds),
     }));
   const ed = src.editor && typeof src.editor === 'object' ? src.editor : {};
   out.editor = { ...base.editor, ...ed };
@@ -193,7 +220,39 @@ function normalizeState(raw) {
       fontFamily: typeof l.fontFamily === 'string' && /^[A-Za-z0-9 ,'"_-]{1,80}$/.test(l.fontFamily) ? l.fontFamily : 'sans-serif',
       align: ['left', 'center', 'right'].includes(l.align) ? l.align : 'left',
       shadow: !!l.shadow,
+      strokeColor: hex6(l.strokeColor, '#000000'),
+      strokeWidth: Math.min(60, Math.max(0, num(l.strokeWidth, 0))),
     }));
+  out.editor.imageLayers = (Array.isArray(ed.imageLayers) ? ed.imageLayers : [])
+    .filter((l) => l && typeof l === 'object' && assetRef(l.assetId))
+    .slice(0, MAX_IMAGE_LAYERS)
+    .map((l) => ({
+      id: typeof l.id === 'string' && ID_RE.test(l.id) ? l.id : uid('img'),
+      assetId: l.assetId,
+      x: num(l.x, 0),
+      y: num(l.y, 0),
+      w: Math.max(8, num(l.w, 400)),
+      h: Math.max(8, num(l.h, 400)),
+      opacity: Math.min(1, Math.max(0, num(l.opacity, 1))),
+    }));
+  const pl = src.promptLab && typeof src.promptLab === 'object' ? src.promptLab : {};
+  const picks = {};
+  if (pl.picks && typeof pl.picks === 'object' && !Array.isArray(pl.picks)) {
+    for (const [k, v] of Object.entries(pl.picks).slice(0, 24)) {
+      if (!ID_RE.test(k) || !Array.isArray(v)) continue;
+      picks[k] = [...new Set(v.filter((x) => typeof x === 'string' && ID_RE.test(x)))].slice(0, 16);
+    }
+  }
+  const seed = Number(pl.seed);
+  out.promptLab = {
+    picks,
+    subject: str(pl.subject, 4000),
+    negative: str(pl.negative, 2000),
+    ratio: PROMPT_RATIOS.includes(pl.ratio) ? pl.ratio : '16:9',
+    depth: PROMPT_DEPTHS.includes(pl.depth) ? pl.depth : 'auto',
+    seed: pl.seed !== null && pl.seed !== undefined && Number.isInteger(seed) && seed >= 0 && seed <= 2147483647 ? seed : null,
+    characterIds: charIds(pl.characterIds),
+  };
   out.notes = str(src.notes);
   return out;
 }
@@ -206,6 +265,8 @@ function validateDraft(d) {
   if (d.state.story.script.length > MAX_SCRIPT) return `대본은 ${MAX_SCRIPT.toLocaleString('ko-KR')}자 이하만 저장할 수 있습니다.`;
   if (d.state.story.scenes.length > MAX_SCENES) return `장면은 최대 ${MAX_SCENES}개까지 저장할 수 있습니다.`;
   if (d.state.editor.textLayers.length > MAX_LAYERS) return `문구 레이어는 최대 ${MAX_LAYERS}개까지 저장할 수 있습니다.`;
+  if (d.state.editor.imageLayers.length > MAX_IMAGE_LAYERS) return `이미지 레이어는 최대 ${MAX_IMAGE_LAYERS}개까지 저장할 수 있습니다.`;
+  if (d.state.story.characters.length > MAX_CHARACTERS) return `등장인물은 최대 ${MAX_CHARACTERS}명까지 저장할 수 있습니다.`;
   const bytes = byteLength(JSON.stringify(d.state));
   if (bytes > MAX_STATE_BYTES) return `작업 데이터가 너무 큽니다 (${formatBytes(bytes)} / 최대 256 KB). 대본이나 메모를 줄여 주세요.`;
   return '';
@@ -764,6 +825,9 @@ async function saveAsCopy(cur) {
     const state = deepClone(d.state);
     // 자료는 작업마다 따로 보관되므로 다른 작업의 이미지 연결은 풀어 둔다.
     state.editor.baseAssetId = null;
+    state.editor.imageLayers = [];
+    for (const c of state.story.characters) c.assetId = null;
+    for (const s of state.story.scenes) s.assetId = null;
     const saved = (await studioApi.patchProject(created.id, { version: created.version, state })).project;
     updateProjectInList(saved);
     S.cur = makeCur(saved);
@@ -773,7 +837,7 @@ async function saveAsCopy(cur) {
     setHash(saved.id);
     renderMain();
     renderProjectList();
-    notify('내 변경을 새 작업으로 저장했습니다. 배경 이미지 연결은 원래 작업에 남아 있습니다.', 'success');
+    notify('내 변경을 새 작업으로 저장했습니다. 이미지 연결(배경·레이어·인물·장면)은 원래 작업에 남아 있습니다.', 'success');
   } catch (err) {
     handleError(err, '새 작업으로 저장하지 못했습니다: ');
   }
@@ -1016,6 +1080,38 @@ async function uploadFiles(files) {
   return created;
 }
 
+async function uploadBlob(blob, name) {
+  if (!blob) return null;
+  const type = ALLOWED_MIME.includes(blob.type) ? blob.type : 'image/png';
+  const file = new File([blob], name || 'image.png', { type });
+  const created = await uploadFiles([file]);
+  return created[0] || null;
+}
+
+/** 이 자료를 쓰는 곳 목록(한국어 설명). */
+function assetUsage(state, assetId) {
+  const out = [];
+  if (state.editor.baseAssetId === assetId) out.push('캔버스 배경');
+  const layers = state.editor.imageLayers.filter((l) => l.assetId === assetId).length;
+  if (layers) out.push(`이미지 레이어 ${layers}개`);
+  const chars = state.story.characters.filter((c) => c.assetId === assetId).length;
+  if (chars) out.push(`등장인물 ${chars}명`);
+  const scenes = state.story.scenes.filter((s) => s.assetId === assetId).length;
+  if (scenes) out.push(`장면 ${scenes}개`);
+  return out;
+}
+
+function clearAssetRefs(state, assetId) {
+  let changed = false;
+  if (state.editor.baseAssetId === assetId) { state.editor.baseAssetId = null; changed = true; }
+  const before = state.editor.imageLayers.length;
+  state.editor.imageLayers = state.editor.imageLayers.filter((l) => l.assetId !== assetId);
+  if (state.editor.imageLayers.length !== before) changed = true;
+  for (const c of state.story.characters) if (c.assetId === assetId) { c.assetId = null; changed = true; }
+  for (const s of state.story.scenes) if (s.assetId === assetId) { s.assetId = null; changed = true; }
+  return changed;
+}
+
 function syncAssetCount(cur) {
   if (!cur || S.cur !== cur) return;
   const p = S.projects.find((x) => x.id === cur.project.id);
@@ -1029,10 +1125,10 @@ function setUploadProgress(text) {
 
 async function deleteAsset(asset) {
   const cur = S.cur;
-  const inUse = cur && cur.draft.state.editor.baseAssetId === asset.id;
+  const usage = cur ? assetUsage(cur.draft.state, asset.id) : [];
   const ok = await confirmDialog({
     title: '자료 삭제',
-    message: `"${asset.name || '이미지'}"를 서버에서 삭제할까요?${inUse ? ' 캔버스 배경에서도 빠집니다.' : ''} 되돌릴 수 없습니다.`,
+    message: `"${asset.name || '이미지'}"를 서버에서 삭제할까요?${usage.length ? ` 사용 중인 곳(${usage.join(', ')})에서도 빠집니다.` : ''} 되돌릴 수 없습니다.`,
     okLabel: '삭제',
     danger: true,
   });
@@ -1043,10 +1139,9 @@ async function deleteAsset(asset) {
     S.assets = S.assets.filter((a) => a.id !== asset.id);
     forgetImage(asset.id);
     syncAssetCount(cur);
-    if (cur.draft.state.editor.baseAssetId === asset.id) {
-      cur.draft.state.editor.baseAssetId = null;
+    if (clearAssetRefs(cur.draft.state, asset.id)) {
       markDirty();
-      notify('자료를 삭제하고 캔버스 배경에서도 뺐습니다. 저장을 눌러 반영하세요.', 'info');
+      notify('자료를 삭제하고 사용 중이던 곳에서도 뺐습니다. 저장을 눌러 반영하세요.', 'info');
     } else {
       notify('자료를 삭제했습니다.', 'success');
     }
@@ -1085,17 +1180,23 @@ function renderAssets(root) {
     if (files.length) uploadFiles(files);
   });
 
+  const sketchBtn = h('button', { type: 'button', class: 'btn', onclick: async () => {
+    const ed = cur.draft.state.editor;
+    const asset = await openSketchPad({ width: ed.width, height: ed.height, background: '#ffffff', baseImage: null, uploadBlob, notify, title: '스케치 그리기' });
+    if (asset && S.cur === cur) renderTab();
+  } }, icon('pen', 'icon-sm'), h('span', null, '스케치 그리기'));
   const grid = h('ul', { class: 'asset-grid', 'aria-label': '올린 자료' });
   if (!S.assets.length) {
     grid.append(h('li', { class: 'empty-note' }, icon('image', 'icon-lg'), h('p', null, '아직 올린 자료가 없습니다.'), h('p', { class: 'muted' }, '여행 사진이나 그림을 올리면 캔버스 배경으로 쓸 수 있습니다.')));
   }
   for (const a of S.assets) {
+    const usage = assetUsage(cur.draft.state, a.id);
     const inUse = cur.draft.state.editor.baseAssetId === a.id;
     const url = assetUrl(a);
     const img = h('img', { src: url, alt: a.name || '자료 이미지', loading: 'lazy', decoding: 'async' });
     img.addEventListener('error', () => { img.replaceWith(h('div', { class: 'thumb-missing' }, icon('alert'), h('span', null, '미리보기 불가'))); });
     grid.append(h('li', { class: `asset-card${inUse ? ' in-use' : ''}` },
-      h('div', { class: 'thumb' }, img, inUse ? h('span', { class: 'badge badge-on' }, '캔버스 사용 중') : null),
+      h('div', { class: 'thumb' }, img, usage.length ? h('span', { class: 'badge badge-on', title: usage.join(', ') }, `사용 중 · ${usage[0]}${usage.length > 1 ? ` 외 ${usage.length - 1}` : ''}`) : null),
       h('div', { class: 'asset-info' },
         h('p', { class: 'asset-name', title: a.name || '' }, a.name || '이름 없음'),
         h('p', { class: 'asset-meta' }, `${formatBytes(a.size)} · ${String(a.mime || '').replace('image/', '').toUpperCase()}${a.createdAt ? ` · ${formatDate(a.createdAt)}` : ''}`),
@@ -1107,6 +1208,7 @@ function renderAssets(root) {
           switchTab('image');
           notify('캔버스 배경으로 지정했습니다. 저장을 눌러 보관하세요.', 'info');
         } }, icon('image', 'icon-sm'), h('span', null, '캔버스 배경')),
+        h('button', { type: 'button', class: 'btn btn-sm btn-quiet', onclick: () => addAssetAsLayer(cur, a) }, icon('layers', 'icon-sm'), h('span', null, '레이어로')),
         h('a', { class: 'icon-btn', href: `${url}?download=1`, download: safeFileName(a.name, 'image'), 'aria-label': `${a.name || '이미지'} 내려받기`, title: '원본 내려받기' }, icon('download')),
         h('button', { type: 'button', class: 'icon-btn danger', 'aria-label': `${a.name || '이미지'} 삭제`, onclick: () => deleteAsset(a) }, icon('trash')),
       ),
@@ -1120,9 +1222,30 @@ function renderAssets(root) {
         h('span', { class: 'counter' }, `${S.assets.length}개 · ${formatBytes(S.assets.reduce((s, a) => s + (Number(a.size) || 0), 0))}`),
       ),
       zone,
+      h('div', { class: 'btn-row assets-tools' }, sketchBtn,
+        h('p', { class: 'hint' }, '스케치는 PNG로 자료함에 저장됩니다. 스케치를 화풍 완성본으로 바꾸는 기능은 AI 연결 후 제공됩니다.')),
       grid,
     ),
   ));
+}
+
+function addAssetAsLayer(cur, asset) {
+  const ed = cur.draft.state.editor;
+  if (ed.imageLayers.length >= MAX_IMAGE_LAYERS) { notify(`이미지 레이어는 최대 ${MAX_IMAGE_LAYERS}개까지 넣을 수 있습니다.`, 'error'); return; }
+  const img = new Image();
+  const finish = (nw, nh) => {
+    const maxW = ed.width * 0.5, maxH = ed.height * 0.5;
+    const ratio = nw && nh ? nw / nh : 1;
+    let w = maxW, hgt = w / ratio;
+    if (hgt > maxH) { hgt = maxH; w = hgt * ratio; }
+    ed.imageLayers.push({ id: uid('img'), assetId: asset.id, x: Math.round((ed.width - w) / 2), y: Math.round((ed.height - hgt) / 2), w: Math.round(w), h: Math.round(hgt), opacity: 1 });
+    markDirty();
+    switchTab('image');
+    notify('이미지 레이어로 추가했습니다. 끌어서 위치와 크기를 조정하세요.', 'success');
+  };
+  img.onload = () => finish(img.naturalWidth, img.naturalHeight);
+  img.onerror = () => finish(1, 1);
+  img.src = assetUrl(asset);
 }
 
 // ======================================================================
@@ -1268,6 +1391,7 @@ function renderTab() {
   if (S.tab === 'story') {
     renderStory(panel, {
       getState, markDirty, notify, choose, confirm: confirmDialog, aiBlocked,
+      getAssets: () => S.assets, uploadFiles, projectTitle: () => S.cur.draft.title, switchTab,
       sendToCanvas: (text) => {
         const ed = S.cur.draft.state.editor;
         const t = String(text || '').trim();
@@ -1284,8 +1408,12 @@ function renderTab() {
       getState, markDirty, notify, aiBlocked,
       getAssets: () => S.assets,
       uploadFiles,
+      uploadBlob,
+      confirm: confirmDialog,
       projectTitle: () => S.cur.draft.title,
     });
+  } else if (S.tab === 'prompt') {
+    renderPromptLab(panel, { getState, markDirty, notify, aiBlocked, confirm: confirmDialog, switchTab });
   } else if (S.tab === 'assets') {
     renderAssets(panel);
   } else {

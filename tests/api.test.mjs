@@ -305,8 +305,9 @@ test('projects: CRUD, validation, version conflict, size limits', async () => {
   assert.equal(p.type, 'travel');
   assert.equal(p.assetCount, 0);
   assert.deepEqual(p.state, {
-    story: { script: '', scenes: [] },
-    editor: { width: 1280, height: 720, background: '#e8e3d8', baseAssetId: null, fit: 'cover', textLayers: [] },
+    story: { script: '', scenes: [], characters: [] },
+    editor: { width: 1280, height: 720, background: '#e8e3d8', baseAssetId: null, fit: 'cover', textLayers: [], imageLayers: [] },
+    promptLab: { picks: {}, subject: '', negative: '', ratio: '16:9', depth: 'auto', seed: null, characterIds: [] },
     notes: '',
   });
   for (const k of ['id', 'title', 'description', 'type', 'version', 'createdAt', 'updatedAt', 'state']) assert.ok(k in p, k);
@@ -323,9 +324,10 @@ test('projects: CRUD, validation, version conflict, size limits', async () => {
     story: {
       script: '첫 장면입니다.\n\n둘째 장면입니다.',
       scenes: [
-        { id: 's1', title: '시작', narration: '안녕하세요', prompt: '바다 풍경', duration: 5 },
-        { id: 's2', title: '끝', narration: '감사합니다', prompt: '노을', duration: 4.5 },
+        { id: 's1', title: '시작', narration: '안녕하세요', prompt: '바다 풍경', duration: 5, imagePrompt: 'seaside, golden hour', assetId: null, characterIds: ['c1'] },
+        { id: 's2', title: '끝', narration: '감사합니다', prompt: '노을', duration: 4.5, imagePrompt: '', assetId: null, characterIds: [] },
       ],
+      characters: [{ id: 'c1', name: '지수', look: '짧은 단발, 노란 우비', assetId: null }],
     },
     editor: {
       width: 1080,
@@ -333,8 +335,10 @@ test('projects: CRUD, validation, version conflict, size limits', async () => {
       background: '#112233',
       baseAssetId: null,
       fit: 'contain',
-      textLayers: [{ id: 't1', text: '제주', x: 100, y: 200, fontSize: 72, color: '#ffffff', fontFamily: 'Noto Sans KR, sans-serif', align: 'center', shadow: true }],
+      textLayers: [{ id: 't1', text: '제주', x: 100, y: 200, fontSize: 72, color: '#ffffff', fontFamily: 'Noto Sans KR, sans-serif', align: 'center', shadow: true, strokeColor: '#000000', strokeWidth: 6 }],
+      imageLayers: [],
     },
+    promptLab: { picks: { style: ['photo'], light: ['golden'] }, subject: '바닷가 산책', negative: 'blurry', ratio: '9:16', depth: 'blur', seed: 1234, characterIds: ['c1'] },
     notes: '메모',
   };
   r = await client.patch(`/api/projects/${p.id}`, { version: 1, title: '제주 가을 여행', state });
@@ -363,6 +367,19 @@ test('projects: CRUD, validation, version conflict, size limits', async () => {
     { editor: { textLayers: [{ id: 't1', fontFamily: 'x</style><script>' }] } },
     { unknownKey: 1 },
     { story: { scenes: [{ id: 'dup' }, { id: 'dup' }] } },
+    { story: { scenes: [{ id: 's1', characterIds: ['ghost'] }] } },
+    { story: { characters: Array.from({ length: 13 }, (_, i) => ({ id: `c${i}` })) } },
+    { story: { scenes: [{ id: 's1', assetId: '../x' }] } },
+    { editor: { imageLayers: [{ id: 'i1' }] } },
+    { editor: { imageLayers: Array.from({ length: 9 }, (_, i) => ({ id: `i${i}`, assetId: '00000000-0000-4000-8000-000000000000' })) } },
+    { editor: { imageLayers: [{ id: 'i1', assetId: '00000000-0000-4000-8000-000000000000', opacity: 2 }] } },
+    { editor: { textLayers: [{ id: 't1', strokeWidth: 999 }] } },
+    { editor: { textLayers: [{ id: 't1', strokeColor: 'red' }] } },
+    { promptLab: { ratio: '5:1' } },
+    { promptLab: { depth: 'deep' } },
+    { promptLab: { seed: 1.5 } },
+    { promptLab: { picks: { 'bad key!': ['x'] } } },
+    { promptLab: { characterIds: ['nobody'] } },
   ];
   for (const s of badStates) {
     r = await client.patch(`/api/projects/${p.id}`, { version: 2, state: s });
@@ -498,7 +515,16 @@ test('export/import: self-contained backup, id remap, validation, rollback', asy
   const up = await client.post(`/api/projects/${pid}/assets`, { name: '표지.png', mime: 'image/png', data: PNG_1X1.toString('base64') });
   const oldAssetId = up.data.asset.id;
   await client.post(`/api/projects/${pid}/assets`, { name: 'b.jpg', mime: 'image/jpeg', data: JPEG_FAKE.toString('base64') });
-  const st = { story: { script: '대본', scenes: [{ id: 'a', title: '장면', narration: '', prompt: '', duration: 3 }] }, editor: { baseAssetId: oldAssetId } };
+  const up2 = await client.post(`/api/projects/${pid}/assets`, { name: 'c.png', mime: 'image/png', data: PNG_1X1.toString('base64') });
+  const charAssetId = up2.data.asset.id;
+  const st = {
+    story: {
+      script: '대본',
+      scenes: [{ id: 'a', title: '장면', narration: '', prompt: '', duration: 3, imagePrompt: 'x', assetId: oldAssetId, characterIds: ['c1'] }],
+      characters: [{ id: 'c1', name: '주인공', look: '', assetId: charAssetId }],
+    },
+    editor: { baseAssetId: oldAssetId, width: 1440, height: 1080, imageLayers: [{ id: 'i1', assetId: charAssetId, x: 10, y: 20, w: 300, h: 200, opacity: 0.5 }] },
+  };
   assert.equal((await client.patch(`/api/projects/${pid}`, { version: 1, state: st })).status, 200);
 
   let r = await client.get(`/api/projects/${pid}/export`, { cookie: null });
@@ -511,7 +537,7 @@ test('export/import: self-contained backup, id remap, validation, rollback', asy
   assert.equal(backup.format, 'personal-studio-backup');
   assert.equal(backup.version, 1);
   assert.deepEqual(Object.keys(backup.project).sort(), ['description', 'state', 'title', 'type']);
-  assert.equal(backup.assets.length, 2);
+  assert.equal(backup.assets.length, 3);
   for (const a of backup.assets) assert.deepEqual(Object.keys(a).sort(), ['data', 'id', 'mime', 'name']);
   const pngEntry = backup.assets.find((a) => a.id === oldAssetId);
   assert.ok(Buffer.compare(Buffer.from(pngEntry.data, 'base64'), PNG_1X1) === 0);
@@ -524,7 +550,7 @@ test('export/import: self-contained backup, id remap, validation, rollback', asy
   const imported = r.data.project;
   assert.notEqual(imported.id, pid);
   assert.equal(imported.title, '백업 대상');
-  assert.equal(imported.assetCount, 2);
+  assert.equal(imported.assetCount, 3);
   assert.equal(imported.version, 1);
   const newBase = imported.state.editor.baseAssetId;
   assert.ok(newBase && newBase !== oldAssetId, 'baseAssetId remapped');
@@ -533,7 +559,16 @@ test('export/import: self-contained backup, id remap, validation, rollback', asy
   assert.ok(newAssets.every((a) => a.id !== oldAssetId));
   r = await client.get(`/api/assets/${newBase}`);
   assert.ok(Buffer.compare(r.data, PNG_1X1) === 0);
-  assert.deepEqual(imported.state.story, st.story);
+  const newIds = new Set(newAssets.map((a) => a.id));
+  const ist = imported.state;
+  assert.equal(ist.editor.width, 1440);
+  assert.ok(newIds.has(ist.story.scenes[0].assetId) && ist.story.scenes[0].assetId !== oldAssetId, 'scene asset remapped');
+  assert.ok(newIds.has(ist.story.characters[0].assetId) && ist.story.characters[0].assetId !== charAssetId, 'character asset remapped');
+  assert.equal(ist.editor.imageLayers.length, 1);
+  assert.ok(newIds.has(ist.editor.imageLayers[0].assetId) && ist.editor.imageLayers[0].assetId !== charAssetId, 'image layer remapped');
+  assert.equal(ist.story.scenes[0].assetId, newBase);
+  assert.deepEqual(ist.story.scenes[0].characterIds, ['c1']);
+  assert.equal(ist.story.script, st.story.script);
 
   const projectCount = async () => (await client.get('/api/projects')).data.projects.length;
   const baselineProjects = await projectCount();
@@ -546,6 +581,7 @@ test('export/import: self-contained backup, id remap, validation, rollback', asy
     { ...backup, assets: [...backup.assets, { id: 'x', name: 'x.png', mime: 'image/png', data: Buffer.from('<html>').toString('base64') }] },
     { ...backup, assets: [backup.assets[0], { ...backup.assets[0] }] },
     { ...backup, project: { ...backup.project, state: { editor: { baseAssetId: 'missing-id' } } } },
+    { ...backup, project: { ...backup.project, state: { ...backup.project.state, story: { ...backup.project.state.story, scenes: [{ id: 'z', assetId: 'missing-id' }] } } } },
     { ...backup, project: { ...backup.project, title: '' } },
     { ...backup, account: { email: 'x' } },
   ];

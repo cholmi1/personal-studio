@@ -15,6 +15,14 @@ export const LIMITS = Object.freeze({
   sceneTextMax: 4000,
   sceneDurationMax: 3600,
   textLayersMax: 20,
+  imageLayersMax: 8,
+  charactersMax: 12,
+  characterNameMax: 60,
+  characterLookMax: 1000,
+  promptPickKeysMax: 24,
+  promptPickValuesMax: 16,
+  promptSubjectMax: 4000,
+  promptNegativeMax: 2000,
   layerTextMax: 1000,
   layerFontFamilyMax: 100,
   notesMax: 20000,
@@ -31,7 +39,11 @@ export const CANVAS_SIZES = Object.freeze([
   [1280, 720],
   [1080, 1920],
   [1080, 1080],
+  [1440, 1080],
+  [1080, 1440],
 ]);
+export const PROMPT_RATIOS = Object.freeze(['1:1', '16:9', '9:16', '4:3', '3:4', '2:3', '3:2']);
+export const PROMPT_DEPTHS = Object.freeze(['auto', 'sharp', 'blur']);
 export const IMAGE_MIMES = Object.freeze({
   'image/png': 'png',
   'image/jpeg': 'jpg',
@@ -40,7 +52,7 @@ export const IMAGE_MIMES = Object.freeze({
 
 export function defaultState() {
   return {
-    story: { script: '', scenes: [] },
+    story: { script: '', scenes: [], characters: [] },
     editor: {
       width: 1280,
       height: 720,
@@ -48,9 +60,15 @@ export function defaultState() {
       baseAssetId: null,
       fit: 'cover',
       textLayers: [],
+      imageLayers: [],
     },
+    promptLab: defaultPromptLab(),
     notes: '',
   };
+}
+
+export function defaultPromptLab() {
+  return { picks: {}, subject: '', negative: '', ratio: '16:9', depth: 'auto', seed: null, characterIds: [] };
 }
 
 function bad(message) {
@@ -103,6 +121,52 @@ const FONT_RE = /^[\p{L}\p{N} ,'"_-]+$/u;
 
 export function isUuid(v) {
   return typeof v === 'string' && UUID_RE.test(v);
+}
+
+/** Asset reference inside state: UUID normally, any short id inside a backup (remapped on import). */
+function checkAssetRef(value, label, allowAny) {
+  if (value === undefined || value === null) return null;
+  if (allowAny) {
+    if (typeof value !== 'string' || value.length < 1 || value.length > LIMITS.idMax) throw bad(`${label} 이미지 id가 올바르지 않습니다.`);
+  } else if (!isUuid(value)) {
+    throw bad(`${label} 이미지 id가 올바르지 않습니다.`);
+  }
+  return value;
+}
+
+function checkIdList(value, label, max, allowed) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw bad(`${label}은(는) 배열이어야 합니다.`);
+  if (value.length > max) throw bad(`${label}은(는) 최대 ${max}개까지 지정할 수 있습니다.`);
+  const seen = new Set();
+  for (const v of value) {
+    checkId(v, label);
+    if (seen.has(v)) throw bad(`${label}에 같은 항목이 중복되었습니다.`);
+    if (allowed && !allowed.has(v)) throw bad(`${label}에 존재하지 않는 등장인물이 있습니다.`);
+    seen.add(v);
+  }
+  return [...value];
+}
+
+/** Every asset id referenced by a (validated) state. */
+export function collectAssetRefs(state) {
+  const refs = [];
+  if (state.editor.baseAssetId) refs.push(state.editor.baseAssetId);
+  for (const l of state.editor.imageLayers) refs.push(l.assetId);
+  for (const c of state.story.characters) if (c.assetId) refs.push(c.assetId);
+  for (const s of state.story.scenes) if (s.assetId) refs.push(s.assetId);
+  return refs;
+}
+
+/** Replace asset ids in a validated state via map(oldId) -> newId|null. */
+export function remapAssetRefs(state, map) {
+  if (state.editor.baseAssetId) state.editor.baseAssetId = map(state.editor.baseAssetId) ?? null;
+  state.editor.imageLayers = state.editor.imageLayers
+    .map((l) => ({ ...l, assetId: map(l.assetId) ?? null }))
+    .filter((l) => l.assetId);
+  for (const c of state.story.characters) if (c.assetId) c.assetId = map(c.assetId) ?? null;
+  for (const s of state.story.scenes) if (s.assetId) s.assetId = map(s.assetId) ?? null;
+  return state;
 }
 
 function checkId(value, label) {
@@ -182,14 +246,35 @@ export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
   if (bytes > LIMITS.stateBytesMax) {
     throw new HttpError(413, `프로젝트 상태 데이터가 256KiB를 초과했습니다.`, 'STATE_TOO_LARGE');
   }
-  rejectUnknownKeys(input, ['story', 'editor', 'notes'], 'state');
+  rejectUnknownKeys(input, ['story', 'editor', 'promptLab', 'notes'], 'state');
   const out = defaultState();
+  const anyRef = allowAnyBaseAssetId;
 
   if (input.story !== undefined) {
     const story = input.story;
     if (!isPlainObject(story)) throw bad('state.story는 객체여야 합니다.');
-    rejectUnknownKeys(story, ['script', 'scenes'], 'state.story');
+    rejectUnknownKeys(story, ['script', 'scenes', 'characters'], 'state.story');
     if (story.script !== undefined) out.story.script = checkString(story.script, '대본', { max: LIMITS.scriptMax });
+    if (story.characters !== undefined) {
+      if (!Array.isArray(story.characters)) throw bad('등장인물 목록은 배열이어야 합니다.');
+      if (story.characters.length > LIMITS.charactersMax) throw bad(`등장인물은 최대 ${LIMITS.charactersMax}명까지 등록할 수 있습니다.`);
+      const seenC = new Set();
+      out.story.characters = story.characters.map((ch, i) => {
+        const label = `등장인물 ${i + 1}`;
+        if (!isPlainObject(ch)) throw bad(`${label}은(는) 객체여야 합니다.`);
+        rejectUnknownKeys(ch, ['id', 'name', 'look', 'assetId'], label);
+        const id = checkId(ch.id, label);
+        if (seenC.has(id)) throw bad(`${label}의 id가 중복되었습니다.`);
+        seenC.add(id);
+        return {
+          id,
+          name: ch.name === undefined ? '' : checkString(ch.name, `${label} 이름`, { max: LIMITS.characterNameMax, allowNewlines: false }),
+          look: ch.look === undefined ? '' : checkString(ch.look, `${label} 외모 설명`, { max: LIMITS.characterLookMax }),
+          assetId: checkAssetRef(ch.assetId, label, anyRef),
+        };
+      });
+    }
+    const characterIds = new Set(out.story.characters.map((c) => c.id));
     if (story.scenes !== undefined) {
       if (!Array.isArray(story.scenes)) throw bad('장면 목록은 배열이어야 합니다.');
       if (story.scenes.length > LIMITS.scenesMax) throw bad(`장면은 최대 ${LIMITS.scenesMax}개까지 만들 수 있습니다.`);
@@ -197,7 +282,7 @@ export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
       out.story.scenes = story.scenes.map((scene, i) => {
         const label = `장면 ${i + 1}`;
         if (!isPlainObject(scene)) throw bad(`${label}은(는) 객체여야 합니다.`);
-        rejectUnknownKeys(scene, ['id', 'title', 'narration', 'prompt', 'duration'], label);
+        rejectUnknownKeys(scene, ['id', 'title', 'narration', 'prompt', 'duration', 'imagePrompt', 'assetId', 'characterIds'], label);
         const id = checkId(scene.id, label);
         if (seen.has(id)) throw bad(`${label}의 id가 중복되었습니다.`);
         seen.add(id);
@@ -211,6 +296,10 @@ export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
             scene.duration === undefined
               ? 0
               : checkNumber(scene.duration, `${label} 길이(초)`, { min: 0, max: LIMITS.sceneDurationMax }),
+          imagePrompt:
+            scene.imagePrompt === undefined ? '' : checkString(scene.imagePrompt, `${label} 이미지 프롬프트`, { max: LIMITS.sceneTextMax }),
+          assetId: checkAssetRef(scene.assetId, label, anyRef),
+          characterIds: checkIdList(scene.characterIds, `${label} 등장인물`, LIMITS.charactersMax, characterIds),
         };
       });
     }
@@ -219,11 +308,11 @@ export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
   if (input.editor !== undefined) {
     const ed = input.editor;
     if (!isPlainObject(ed)) throw bad('state.editor는 객체여야 합니다.');
-    rejectUnknownKeys(ed, ['width', 'height', 'background', 'baseAssetId', 'fit', 'textLayers'], 'state.editor');
+    rejectUnknownKeys(ed, ['width', 'height', 'background', 'baseAssetId', 'fit', 'textLayers', 'imageLayers'], 'state.editor');
     const width = ed.width === undefined ? out.editor.width : ed.width;
     const height = ed.height === undefined ? out.editor.height : ed.height;
     if (!CANVAS_SIZES.some(([w, h]) => w === width && h === height)) {
-      throw bad('캔버스 크기는 1280x720, 1080x1920, 1080x1080 중 하나여야 합니다.');
+      throw bad(`캔버스 크기는 ${CANVAS_SIZES.map(([w, h]) => `${w}x${h}`).join(', ')} 중 하나여야 합니다.`);
     }
     out.editor.width = width;
     out.editor.height = height;
@@ -256,7 +345,7 @@ export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
       out.editor.textLayers = ed.textLayers.map((layer, i) => {
         const label = `텍스트 레이어 ${i + 1}`;
         if (!isPlainObject(layer)) throw bad(`${label}은(는) 객체여야 합니다.`);
-        rejectUnknownKeys(layer, ['id', 'text', 'x', 'y', 'fontSize', 'color', 'fontFamily', 'align', 'shadow'], label);
+        rejectUnknownKeys(layer, ['id', 'text', 'x', 'y', 'fontSize', 'color', 'fontFamily', 'align', 'shadow', 'strokeColor', 'strokeWidth'], label);
         const id = checkId(layer.id, label);
         if (seen.has(id)) throw bad(`${label}의 id가 중복되었습니다.`);
         seen.add(id);
@@ -269,6 +358,9 @@ export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
         if (!['left', 'center', 'right'].includes(align)) throw bad(`${label} 정렬은 left, center, right 중 하나여야 합니다.`);
         const shadow = layer.shadow === undefined ? false : layer.shadow;
         if (typeof shadow !== 'boolean') throw bad(`${label} 그림자 값은 true/false여야 합니다.`);
+        const strokeColor = layer.strokeColor === undefined ? '#000000' : layer.strokeColor;
+        if (typeof strokeColor !== 'string' || !COLOR_RE.test(strokeColor)) throw bad(`${label} 외곽선 색상은 #RRGGBB 형식이어야 합니다.`);
+        const strokeWidth = layer.strokeWidth === undefined ? 0 : checkNumber(layer.strokeWidth, `${label} 외곽선 두께`, { min: 0, max: 60 });
         return {
           id,
           text: layer.text === undefined ? '' : checkString(layer.text, `${label} 문구`, { max: LIMITS.layerTextMax }),
@@ -279,9 +371,66 @@ export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
           fontFamily,
           align,
           shadow,
+          strokeColor,
+          strokeWidth,
         };
       });
     }
+    if (ed.imageLayers !== undefined) {
+      if (!Array.isArray(ed.imageLayers)) throw bad('이미지 레이어 목록은 배열이어야 합니다.');
+      if (ed.imageLayers.length > LIMITS.imageLayersMax) {
+        throw bad(`이미지 레이어는 최대 ${LIMITS.imageLayersMax}개까지 넣을 수 있습니다.`);
+      }
+      const seen = new Set();
+      out.editor.imageLayers = ed.imageLayers.map((layer, i) => {
+        const label = `이미지 레이어 ${i + 1}`;
+        if (!isPlainObject(layer)) throw bad(`${label}은(는) 객체여야 합니다.`);
+        rejectUnknownKeys(layer, ['id', 'assetId', 'x', 'y', 'w', 'h', 'opacity'], label);
+        const id = checkId(layer.id, label);
+        if (seen.has(id)) throw bad(`${label}의 id가 중복되었습니다.`);
+        seen.add(id);
+        const assetId = checkAssetRef(layer.assetId, label, anyRef);
+        if (!assetId) throw bad(`${label}에 이미지가 지정되지 않았습니다.`);
+        return {
+          id,
+          assetId,
+          x: layer.x === undefined ? 0 : checkNumber(layer.x, `${label} x`, { min: -20000, max: 20000 }),
+          y: layer.y === undefined ? 0 : checkNumber(layer.y, `${label} y`, { min: -20000, max: 20000 }),
+          w: layer.w === undefined ? 400 : checkNumber(layer.w, `${label} 너비`, { min: 8, max: 20000 }),
+          h: layer.h === undefined ? 400 : checkNumber(layer.h, `${label} 높이`, { min: 8, max: 20000 }),
+          opacity: layer.opacity === undefined ? 1 : checkNumber(layer.opacity, `${label} 투명도`, { min: 0, max: 1 }),
+        };
+      });
+    }
+  }
+
+  if (input.promptLab !== undefined) {
+    const pl = input.promptLab;
+    if (!isPlainObject(pl)) throw bad('state.promptLab은 객체여야 합니다.');
+    rejectUnknownKeys(pl, ['picks', 'subject', 'negative', 'ratio', 'depth', 'seed', 'characterIds'], 'state.promptLab');
+    if (pl.picks !== undefined) {
+      if (!isPlainObject(pl.picks)) throw bad('프롬프트 선택 항목은 객체여야 합니다.');
+      const keys = Object.keys(pl.picks);
+      if (keys.length > LIMITS.promptPickKeysMax) throw bad('프롬프트 선택 분류가 너무 많습니다.');
+      for (const k of keys) {
+        checkId(k, '프롬프트 분류');
+        out.promptLab.picks[k] = checkIdList(pl.picks[k], `프롬프트 분류 ${k.slice(0, 20)}`, LIMITS.promptPickValuesMax);
+      }
+    }
+    if (pl.subject !== undefined) out.promptLab.subject = checkString(pl.subject, '장면 묘사', { max: LIMITS.promptSubjectMax });
+    if (pl.negative !== undefined) out.promptLab.negative = checkString(pl.negative, '제외할 요소', { max: LIMITS.promptNegativeMax });
+    if (pl.ratio !== undefined) {
+      if (!PROMPT_RATIOS.includes(pl.ratio)) throw bad(`비율은 ${PROMPT_RATIOS.join(', ')} 중 하나여야 합니다.`);
+      out.promptLab.ratio = pl.ratio;
+    }
+    if (pl.depth !== undefined) {
+      if (!PROMPT_DEPTHS.includes(pl.depth)) throw bad('배경 심도는 auto, sharp, blur 중 하나여야 합니다.');
+      out.promptLab.depth = pl.depth;
+    }
+    if (pl.seed !== undefined && pl.seed !== null) {
+      out.promptLab.seed = checkNumber(pl.seed, '시드', { min: 0, max: 2147483647, integer: true });
+    }
+    out.promptLab.characterIds = checkIdList(pl.characterIds, '프롬프트 등장인물', LIMITS.charactersMax, new Set(out.story.characters.map((c) => c.id)));
   }
 
   if (input.notes !== undefined) out.notes = checkString(input.notes, '메모', { max: LIMITS.notesMax });
@@ -386,6 +535,9 @@ export function validateBackup(body) {
 
   if (state.editor.baseAssetId !== null && !ids.has(state.editor.baseAssetId)) {
     throw bad('기본 이미지가 백업 이미지 목록에 없습니다.');
+  }
+  for (const ref of collectAssetRefs(state)) {
+    if (!ids.has(ref)) throw bad('백업 상태가 참조하는 이미지가 백업 이미지 목록에 없습니다.');
   }
   return { title, description, type, state, assets };
 }

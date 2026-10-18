@@ -30,6 +30,7 @@ import {
   validateType,
   validateVersion,
   validateState,
+  remapAssetRefs,
   validateImagePayload,
   validateBackup,
 } from './validation.mjs';
@@ -560,7 +561,7 @@ export function createStudioServer(options = {}) {
         records.push({ id: newId, name: a.name, mime: a.mime, size: a.bytes.length, file });
       }
       const state = backup.state;
-      if (state.editor.baseAssetId !== null) state.editor.baseAssetId = idMap.get(state.editor.baseAssetId) ?? null;
+      remapAssetRefs(state, (oldId) => idMap.get(oldId));
       const ts = nowIso();
       transaction(db, () => {
         if (q.projectCount.get().n >= MAX_PROJECTS) {
