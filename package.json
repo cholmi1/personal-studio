@@ -1,0 +1,14 @@
+{
+  "name": "personal-creation-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "개인용 비공개 창작실의 로컬 개발 버전",
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test tests/api.test.mjs"
+  }
+}
