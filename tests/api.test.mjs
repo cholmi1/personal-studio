@@ -310,6 +310,7 @@ test('projects: CRUD, validation, version conflict, size limits', async () => {
     editor: { width: 1280, height: 720, background: '#e8e3d8', baseAssetId: null, fit: 'cover', textLayers: [], imageLayers: [] },
     promptLab: { picks: {}, subject: '', negative: '', ratio: '16:9', depth: 'auto', seed: null, characterIds: [] },
     detailPage: { productAssetIds: [], modelAssetId: null, extraInfo: '', reviewSummary: '', settings: { template: 'basic', count: 7, lang: '한국어', ratio: 'portrait', style: '미니멀', mode: 'edit', model: 'none', tone: '' }, plan: null },
+    featureStudio: {},
     notes: '',
   });
   for (const k of ['id', 'title', 'description', 'type', 'version', 'createdAt', 'updatedAt', 'state']) assert.ok(k in p, k);
@@ -357,6 +358,7 @@ test('projects: CRUD, validation, version conflict, size limits', async () => {
         }],
       },
     },
+    featureStudio: {},
     notes: '메모',
   };
   r = await client.patch(`/api/projects/${p.id}`, { version: 1, title: '제주 가을 여행', state });

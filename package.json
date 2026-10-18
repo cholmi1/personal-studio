@@ -1,9 +1,9 @@
 {
   "name": "personal-creation-studio",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
-  "description": "개인용 창작실: 로컬 AI 테스트 및 영구 디스크 서버 배포 준비",
+  "description": "첨부 참조 기반 6개 창작 도구와 상세페이지 제작을 제공하는 개인 창작실",
   "engines": {
     "node": ">=24.15.0 <25"
   },

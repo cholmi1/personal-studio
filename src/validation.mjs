@@ -9,6 +9,7 @@ export const LIMITS = Object.freeze({
   titleMax: 120,
   descriptionMax: 2000,
   stateBytesMax: 256 * KiB,
+  featureStateBytesMax: 100 * KiB,
   scriptMax: 40000,
   scenesMax: 60,
   sceneTitleMax: 200,
@@ -81,6 +82,7 @@ export function defaultState() {
     },
     promptLab: defaultPromptLab(),
     detailPage: defaultDetailPage(),
+    featureStudio: {},
     notes: '',
   };
 }
@@ -307,6 +309,99 @@ function validateDetailPage(dp, anyRef) {
   return out;
 }
 
+
+// Feature panels deliberately accept bounded JSON rather than panel-specific schemas.
+const FEATURE_TOOLS = Object.freeze(['canvas', 'signature', 'photo-anime', 'anime-photo', 'compose', 'storyboard']);
+const UNSAFE_FEATURE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const featureScalarRef = (key) => key === 'assetId' || key.endsWith('AssetId');
+const featureListRef = (key) => key === 'refIds' || key === 'assetIds' || key.endsWith('AssetIds');
+
+function validateFeatureStudio(input, anyRef) {
+  let bytes = 0;
+  const addBytes = (n) => {
+    bytes += n;
+    if (bytes > LIMITS.featureStateBytesMax) throw new HttpError(413, '기능 상태 데이터가 100KiB를 초과했습니다.', 'FEATURE_STATE_TOO_LARGE');
+  };
+  const active = new Set();
+  const plain = (v) => v !== null && typeof v === 'object' &&
+    (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
+  const walk = (v, depth, key = '') => {
+    if (depth > 8) throw bad('기능 상태의 중첩 깊이는 최대 8입니다.');
+    if (featureScalarRef(key)) {
+      if (v === undefined) throw bad('기능 이미지 참조는 null 또는 id여야 합니다.');
+      checkAssetRef(v, '기능 상태', anyRef);
+    }
+    if (featureListRef(key)) {
+      if (!Array.isArray(v)) throw bad('기능 이미지 참조 목록은 배열이어야 합니다.');
+    }
+    if (v === null || typeof v === 'boolean') {
+      addBytes(v === null ? 4 : v ? 4 : 5);
+      return v;
+    }
+    if (typeof v === 'string') {
+      checkString(v, '기능 상태 문자열', { max: 20000 });
+      addBytes(Buffer.byteLength(JSON.stringify(v), 'utf8'));
+      return v;
+    }
+    if (typeof v === 'number') {
+      checkNumber(v, '기능 상태 숫자', { min: -1e8, max: 1e8 });
+      addBytes(JSON.stringify(v).length);
+      return v;
+    }
+    if (!Array.isArray(v) && !plain(v)) throw bad('기능 상태는 안전한 JSON 값이어야 합니다.');
+    if (active.has(v)) throw bad('기능 상태에 순환 참조가 있습니다.');
+    active.add(v);
+    const keys = Reflect.ownKeys(v);
+    let out;
+    if (Array.isArray(v)) {
+      if (v.length > 40 || keys.length !== v.length + 1) throw bad('기능 상태 배열은 최대 40개의 JSON 값이어야 합니다.');
+      out = [];
+      addBytes(2 + Math.max(0, v.length - 1));
+      for (let i = 0; i < v.length; i += 1) {
+        const d = Object.getOwnPropertyDescriptor(v, String(i));
+        if (!d || !d.enumerable || !Object.hasOwn(d, 'value')) throw bad('기능 상태 배열 항목이 올바르지 않습니다.');
+        out.push(walk(d.value, depth + 1));
+      }
+    } else {
+      if (keys.length > 80) throw bad('기능 상태 객체는 최대 80개 항목이어야 합니다.');
+      out = {};
+      addBytes(2 + Math.max(0, keys.length - 1));
+      for (const k of keys) {
+        if (typeof k !== 'string' || UNSAFE_FEATURE_KEYS.has(k)) throw bad('기능 상태에 안전하지 않은 키가 있습니다.');
+        checkString(k, '기능 상태 키', { max: 80 });
+        const d = Object.getOwnPropertyDescriptor(v, k);
+        if (!d.enumerable || !Object.hasOwn(d, 'value')) throw bad('기능 상태 객체 항목이 올바르지 않습니다.');
+        if (depth === 0) {
+          if (k === 'activeTool') {
+            if (d.value !== null && ![...FEATURE_TOOLS, 'detail'].includes(d.value)) throw bad('활성 기능이 올바르지 않습니다.');
+          } else if (!FEATURE_TOOLS.includes(k) || !plain(d.value)) {
+            throw bad('기능 상태에는 지원하는 도구 객체만 지정할 수 있습니다.');
+          }
+        }
+        addBytes(Buffer.byteLength(JSON.stringify(k), 'utf8') + 1);
+        out[k] = walk(d.value, depth + 1, k);
+      }
+    }
+    if (featureListRef(key)) {
+      for (const id of out) if (!checkAssetRef(id, '기능 상태', anyRef)) throw bad('기능 이미지 참조 목록에 빈 id가 있습니다.');
+    }
+    active.delete(v);
+    return out;
+  };
+  if (!plain(input)) throw bad('state.featureStudio는 객체여야 합니다.');
+  return walk(input, 0);
+}
+
+// Shared traversal keeps ownership checks and backup import remapping consistent.
+function visitFeatureRefs(value, scalar, list) {
+  if (!value || typeof value !== 'object') return;
+  for (const key of Object.keys(value)) {
+    if (featureScalarRef(key)) value[key] = value[key] ? scalar(value[key]) : null;
+    else if (featureListRef(key)) value[key] = list(value[key]);
+    else visitFeatureRefs(value[key], scalar, list);
+  }
+}
+
 /** Every asset id referenced by a (validated) state. */
 export function collectAssetRefs(state) {
   const refs = [];
@@ -317,6 +412,7 @@ export function collectAssetRefs(state) {
   for (const l of state.editor.imageLayers) refs.push(l.assetId);
   for (const c of state.story.characters) if (c.assetId) refs.push(c.assetId);
   for (const s of state.story.scenes) if (s.assetId) refs.push(s.assetId);
+  visitFeatureRefs(state.featureStudio, (id) => { refs.push(id); return id; }, (ids) => { refs.push(...ids); return ids; });
   return refs;
 }
 
@@ -332,6 +428,7 @@ export function remapAssetRefs(state, map) {
   dp.productAssetIds = dp.productAssetIds.map((id) => map(id) ?? null).filter(Boolean);
   if (dp.modelAssetId) dp.modelAssetId = map(dp.modelAssetId) ?? null;
   if (dp.plan) for (const s of dp.plan.sections) if (s.assetId) s.assetId = map(s.assetId) ?? null;
+  visitFeatureRefs(state.featureStudio, (id) => map(id) ?? null, (ids) => ids.map((id) => map(id) ?? null).filter(Boolean));
   return state;
 }
 
@@ -408,12 +505,14 @@ export function validateVersion(value) {
  */
 export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
   if (!isPlainObject(input)) throw bad('state는 객체여야 합니다.');
+  const featureStudio = input.featureStudio === undefined ? {} : validateFeatureStudio(input.featureStudio, allowAnyBaseAssetId);
   const bytes = Buffer.byteLength(JSON.stringify(input), 'utf8');
   if (bytes > LIMITS.stateBytesMax) {
     throw new HttpError(413, `프로젝트 상태 데이터가 256KiB를 초과했습니다.`, 'STATE_TOO_LARGE');
   }
-  rejectUnknownKeys(input, ['story', 'editor', 'promptLab', 'detailPage', 'notes'], 'state');
+  rejectUnknownKeys(input, ['story', 'editor', 'promptLab', 'detailPage', 'featureStudio', 'notes'], 'state');
   const out = defaultState();
+  out.featureStudio = featureStudio;
   const anyRef = allowAnyBaseAssetId;
 
   if (input.story !== undefined) {

@@ -148,7 +148,7 @@ export function openSketchPad({ width = 1280, height = 720, background = '#fffff
       h('div', { class: 'field' }, h('span', { class: 'label-like' }, '배경'), paperGroup),
       guideField,
       h('p', { class: 'sketch-note' }, icon('info', 'icon-sm'),
-        h('span', null, '스케치를 원하는 화풍의 완성본으로 바꾸는 기능은 AI 연결 후 제공됩니다. 지금은 스케치 저장·합성만 가능합니다.')),
+        h('span', null, '자료함에 저장한 뒤 디렉터 캔버스에서 화풍과 장면 묘사를 선택해 AI 변환을 요청할 수 있습니다. 저장 자체는 AI를 호출하지 않습니다.')),
       h('div', { class: 'sketch-actions' }, cancelBtn, saveBtn),
       status,
     );

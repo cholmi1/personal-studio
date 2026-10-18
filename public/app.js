@@ -8,6 +8,8 @@ import { renderPromptLab } from './promptlab.js';
 import { openSketchPad } from './sketch.js';
 import { renderDetailPage } from './detail-page.js';
 import { createAiController } from './ai-settings.js';
+import { FEATURE_TOOLS, renderFeatureStudio } from './feature-studio.js';
+import { renderStudioHome } from './studio-home.js';
 
 const TYPE_LABELS = { travel: '여행', story: '이야기', image: '이미지', product: '상세페이지', other: '기타' };
 const TYPES = Object.keys(TYPE_LABELS);
@@ -25,6 +27,7 @@ const DEFAULT_STATE = {
     settings: { template: 'basic', count: 7, lang: '한국어', ratio: 'portrait', style: '미니멀', mode: 'edit', model: 'none', tone: '' },
     plan: null,
   },
+  featureStudio: {},
   notes: '',
 };
 const DP = {
@@ -44,6 +47,7 @@ const PROMPT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3', '3:2'];
 const PROMPT_DEPTHS = ['auto', 'sharp', 'blur'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TABS = [
+  ...FEATURE_TOOLS.map(t => ({ id: t.id, label: t.name, icon: t.icon })),
   { id: 'story', label: '대본·장면', icon: 'pen' },
   { id: 'image', label: '이미지·썸네일', icon: 'image' },
   { id: 'detail', label: '상세페이지', icon: 'layers' },
@@ -60,7 +64,7 @@ const S = {
   typeFilter: 'all',
   cur: null, // { project, draft:{title,description,type,state}, dirty, rev, saving, savedAt, error, conflict }
   assets: [],
-  tab: 'story',
+  tab: 'signature',
   loadingProject: false,
   reauthOpen: false,
 };
@@ -608,8 +612,13 @@ function enterWorkspace() {
     if (f) importBackup(f);
   });
   UI.library = h('aside', { id: 'library', class: 'library', 'aria-label': '작업 목록' },
+    h('button', { type: 'button', class: 'studio-home-link', onclick: closeProject }, icon('scenes', 'icon-sm'), '창작 도구 전체 보기'),
+    h('h2', { class: 'studio-nav-title' }, '창작 도구'),
+    UI.toolNav = h('nav', { class: 'studio-tool-nav', 'aria-label': '창작 도구' }, ...FEATURE_TOOLS.map(t => h('button', { type: 'button', class: 'studio-tool-link', 'data-tool': t.id, onclick: () => launchTool(t.id) }, icon(t.icon, 'icon-sm'), h('span', null, t.name)))),
+    h('h2', { class: 'studio-nav-title' }, '추가 기능'),
+    h('button', { type: 'button', class: 'studio-tool-link studio-detail-link', 'data-tool': 'detail', onclick: () => launchTool('detail') }, icon('layers', 'icon-sm'), '상세페이지 제작', h('span', { class: 'studio-additional' }, '유지')),
     h('div', { class: 'lib-head' },
-      h('h2', { class: 'lib-title' }, '작업 목록'),
+      h('h2', { class: 'lib-title' }, '내 작업 목록'),
       h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: newProjectDialog }, icon('plus', 'icon-sm'), h('span', null, '새 작업')),
     ),
     h('div', { class: 'search-box' },
@@ -1000,7 +1009,7 @@ async function openProject(id, { fromHash = false } = {}) {
     const [p, a] = await Promise.all([studioApi.getProject(id), studioApi.listAssets(id)]);
     S.cur = makeCur(p.project);
     S.assets = Array.isArray(a.assets) ? a.assets : [];
-    S.tab = p.project.type === 'product' ? 'detail' : 'story';
+    S.tab = p.project.state?.featureStudio?.activeTool || (p.project.type === 'product' ? 'detail' : p.project.type === 'story' || p.project.type === 'travel' ? 'storyboard' : 'signature');
     setHash(id);
   } catch (err) {
     S.cur = null;
@@ -1028,14 +1037,14 @@ async function closeProject() {
 
 async function newProjectDialog() {
   if (!(await confirmLeave())) return;
-  const title = h('input', { id: 'np-title', class: 'input', maxLength: 120, required: true, placeholder: '예: 가을 남해 여행 기록' });
-  const type = h('select', { id: 'np-type', class: 'input' }, ...TYPES.map((t) => h('option', { value: t }, TYPE_LABELS[t])));
+  const title = h('input', { id: 'np-title', class: 'input', maxLength: 120, required: true, placeholder: '새 창작 작업 제목' });
+  const type = h('select', { id: 'np-type', class: 'input' }, ...FEATURE_TOOLS.map(t => h('option', { value: t.id, selected: S.tab === t.id }, t.name)), h('option', { value: 'detail', selected: S.tab === 'detail' }, '상세페이지 제작 (추가 기능)'));
   const desc = h('textarea', { id: 'np-desc', class: 'input', rows: 3, maxLength: 2000, placeholder: '어떤 작업인지 짧게 (선택)' });
   await openDialog({
     title: '새 작업 만들기',
     content: h('div', { class: 'stack' },
       h('div', { class: 'field' }, h('label', { htmlFor: 'np-title' }, '제목'), title),
-      h('div', { class: 'field' }, h('label', { htmlFor: 'np-type' }, '종류'), type),
+      h('div', { class: 'field' }, h('label', { htmlFor: 'np-type' }, '시작할 기능'), type),
       h('div', { class: 'field' }, h('label', { htmlFor: 'np-desc' }, '설명'), desc),
     ),
     initialFocus: '#np-title',
@@ -1044,8 +1053,10 @@ async function newProjectDialog() {
       const t = title.value.trim();
       if (!t) { showError('제목을 입력해 주세요.'); title.focus(); return false; }
       try {
-        const res = await studioApi.createProject({ title: t, description: desc.value.trim(), type: type.value });
+        const res = await studioApi.createProject({ title: t, description: desc.value.trim(), type: type.value === 'detail' ? 'product' : type.value === 'storyboard' ? 'story' : 'image' });
         await afterCreate(res.project);
+        switchTab(type.value);
+        if (S.cur?.dirty) await save();
         return 'ok';
       } catch (err) {
         if (err.status === 401) { reauth(); return 'ok'; }
@@ -1063,30 +1074,49 @@ async function afterCreate(project) {
   notify('새 작업을 만들었습니다.', 'success');
 }
 
-async function deleteProject() {
-  const cur = S.cur;
-  if (!cur) return;
-  const ok = await confirmDialog({
+async function deleteProject(id = S.cur?.project.id) {
+  const cur = S.cur?.project.id === id ? S.cur : null;
+  const project = cur?.project || S.projects.find((p) => p.id === id);
+  if (!project) return;
+  if (cur?.saving) { notify('저장이 끝난 뒤 다시 삭제해 주세요.', 'info'); return; }
+  const title = cur ? cur.draft.title : project.title;
+  const deleted = await openDialog({
     title: '작업 삭제',
-    message: `"${cur.draft.title || '제목 없음'}" 작업과 이 작업에 올린 자료 이미지가 서버에서 삭제됩니다. 되돌릴 수 없으니 필요하면 먼저 백업을 내려받으세요.`,
-    okLabel: '영구 삭제',
-    danger: true,
+    message: `"${title || '제목 없음'}" 작업과 이 작업에 올린 자료 이미지가 서버에서 영구 삭제됩니다. 최근 목록에서만 숨기는 기능이 아니며, 되돌릴 수 없습니다. 필요하면 먼저 작업을 열어 백업을 내려받으세요.`,
+    initialFocus: '.dialog-actions > button[type="button"]',
+    actions: [{ value: 'delete', label: '영구 삭제', variant: 'danger' }],
+    onAction: async (_value, form, showError) => {
+      // 요청 중에는 중복 삭제와 취소로 인한 결과 혼동을 막는다.
+      const dialog = form.closest('dialog');
+      const lockCancel = (event) => event.preventDefault();
+      const cancelButtons = [...form.querySelectorAll('button[type="button"]')];
+      cancelButtons.forEach((button) => { button.disabled = true; });
+      dialog.addEventListener('cancel', lockCancel);
+      form.setAttribute('aria-busy', 'true');
+      try {
+        await studioApi.deleteProject(id);
+        S.projects = S.projects.filter((p) => p.id !== id);
+        if (S.cur?.project.id === id) {
+          S.assets.forEach((a) => forgetImage(a.id));
+          S.cur = null;
+          S.assets = [];
+          setHash(null);
+        }
+        if (!S.cur) renderMain();
+        renderProjectList();
+        renderSaveStatus();
+        return 'deleted';
+      } catch (err) {
+        showError(err.status === 401 ? '로그인 세션이 끝났습니다. 확인창을 닫고 다시 로그인한 뒤 시도해 주세요.' : `삭제하지 못했습니다: ${err.message || '서버에 연결하지 못했습니다.'}`);
+        return false;
+      } finally {
+        cancelButtons.forEach((button) => { button.disabled = false; });
+        dialog.removeEventListener('cancel', lockCancel);
+        form.removeAttribute('aria-busy');
+      }
+    },
   });
-  if (!ok) return;
-  try {
-    await studioApi.deleteProject(cur.project.id);
-    S.projects = S.projects.filter((p) => p.id !== cur.project.id);
-    S.assets.forEach((a) => forgetImage(a.id));
-    S.cur = null;
-    S.assets = [];
-    setHash(null);
-    renderMain();
-    renderProjectList();
-    renderSaveStatus();
-    notify('작업을 삭제했습니다.', 'success');
-  } catch (err) {
-    handleError(err, '삭제하지 못했습니다: ');
-  }
+  if (deleted === 'deleted') notify('작업을 삭제했습니다.', 'success');
 }
 
 // ======================================================================
@@ -1221,6 +1251,7 @@ function assetUsage(state, assetId) {
   if (chars) out.push(`등장인물 ${chars}명`);
   const scenes = state.story.scenes.filter((s) => s.assetId === assetId).length;
   if (scenes) out.push(`장면 ${scenes}개`);
+  if (JSON.stringify(state.featureStudio || {}).includes(assetId)) out.push('창작 도구 입력·결과 이미지');
   const dp = state.detailPage;
   if (dp.productAssetIds.includes(assetId)) out.push('상세페이지 제품 이미지');
   if (dp.modelAssetId === assetId) out.push('상세페이지 모델');
@@ -1231,6 +1262,15 @@ function assetUsage(state, assetId) {
 
 function clearAssetRefs(state, assetId) {
   let changed = false;
+  const cleanFeature = obj => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const [key,value] of Object.entries(obj)) {
+      if (value === assetId && (key === 'assetId' || /AssetId$/.test(key))) { obj[key] = null; changed = true; }
+      else if (Array.isArray(value) && /(?:refIds|assetIds)$/i.test(key)) { const next = value.filter(id => id !== assetId); if (next.length !== value.length) { obj[key] = next; changed = true; } }
+      else if (value && typeof value === 'object') cleanFeature(value);
+    }
+  };
+  cleanFeature(state.featureStudio);
   if (state.editor.baseAssetId === assetId) { state.editor.baseAssetId = null; changed = true; }
   const before = state.editor.imageLayers.length;
   state.editor.imageLayers = state.editor.imageLayers.filter((l) => l.assetId !== assetId);
@@ -1420,7 +1460,7 @@ function renderInfo(root) {
       h('section', { class: 'panel danger-zone', 'aria-labelledby': 'danger-heading' },
         h('h2', { id: 'danger-heading', class: 'panel-title' }, icon('trash'), '작업 삭제'),
         h('p', { class: 'muted small-text' }, '작업과 자료 이미지가 서버에서 영구 삭제됩니다.'),
-        h('button', { type: 'button', class: 'btn btn-danger', onclick: deleteProject }, icon('trash', 'icon-sm'), h('span', null, '이 작업 삭제')),
+        h('button', { type: 'button', class: 'btn btn-danger', onclick: () => deleteProject() }, icon('trash', 'icon-sm'), h('span', null, '이 작업 삭제')),
       ),
     ),
   ));
@@ -1430,7 +1470,9 @@ function renderInfo(root) {
 // 본문 렌더링
 // ======================================================================
 function renderMain() {
+  UI.featureCleanup?.(); UI.featureCleanup = null;
   if (!UI.main) return;
+  updateToolNavigation();
   clear(UI.main);
   UI.saveBtn = null;
   UI.tabbar = null;
@@ -1509,19 +1551,28 @@ function renderTabs() {
 }
 
 function switchTab(id) {
-  if (!S.cur) return;
+  if (!S.cur || !TABS.some(t => t.id === id)) return;
+  UI.featureCleanup?.(); UI.featureCleanup = null;
   S.tab = id;
+  if (FEATURE_TOOLS.some(t => t.id === id) || id === 'detail') {
+    const fs = S.cur.draft.state.featureStudio ||= {};
+    if (fs.activeTool !== id) { fs.activeTool = id; markDirty(); }
+  }
+  updateToolNavigation();
   renderTabs();
   renderTab();
 }
 
 function renderTab() {
+  UI.featureCleanup?.(); UI.featureCleanup = null;
   const panel = UI.tabPanel;
   if (!panel || !S.cur) return;
   panel.setAttribute('aria-labelledby', `tab-${S.tab}`);
   const getState = () => S.cur.draft.state;
   const ai = aiController;
-  if (S.tab === 'story') {
+  if (FEATURE_TOOLS.some(t => t.id === S.tab)) {
+    UI.featureCleanup = renderFeatureStudio(panel, S.tab, { getState, markDirty, notify, ai, getAssets: () => S.assets, uploadFiles, uploadBlob, confirm: confirmDialog, openSketchPad, switchTab, projectTitle: () => S.cur?.draft.title });
+  } else if (S.tab === 'story') {
     renderStory(panel, {
       getState, markDirty, notify, choose, confirm: confirmDialog, aiBlocked, ai,
       getAssets: () => S.assets, uploadFiles, projectTitle: () => S.cur.draft.title, switchTab,
@@ -1560,68 +1611,33 @@ function renderTab() {
 }
 
 function renderHome() {
-  const name = (S.user && S.user.name) || '나';
-  const qTitle = h('input', { id: 'quick-title', class: 'input', maxLength: 120, placeholder: '새 작업 제목', autocomplete: 'off' });
-  const qType = h('select', { id: 'quick-type', class: 'input', 'aria-label': '종류' }, ...TYPES.map((t) => h('option', { value: t }, TYPE_LABELS[t])));
-  const qErr = h('p', { class: 'form-error', role: 'alert', hidden: true });
-  const quick = h('form', { class: 'quick-form', novalidate: true },
-    h('label', { class: 'sr-only', htmlFor: 'quick-title' }, '새 작업 제목'),
-    qTitle, qType,
-    h('button', { type: 'submit', class: 'btn btn-primary' }, icon('plus', 'icon-sm'), h('span', null, '시작')),
-  );
-  quick.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    qErr.hidden = true;
-    const t = qTitle.value.trim();
-    if (!t) { qErr.textContent = '제목을 입력해 주세요.'; qErr.hidden = false; qTitle.focus(); return; }
-    try {
-      const res = await studioApi.createProject({ title: t, type: qType.value, description: '' });
-      await afterCreate(res.project);
-    } catch (err) {
-      if (err.status === 401) reauth();
-      else { qErr.textContent = err.message; qErr.hidden = false; }
-    }
+  renderStudioHome(UI.main, { tools: FEATURE_TOOLS, projects: sortedProjects(), name: S.user?.name || '나', launch: launchTool, openProject, deleteProject, configured: !!S.status?.ai?.configured });
+}
+
+function updateToolNavigation() {
+  document.querySelectorAll('[data-tool]').forEach(el => {
+    const active = !!S.cur && el.dataset.tool === S.tab;
+    el.classList.toggle('is-active', active);
+    if (active) el.setAttribute('aria-current','page'); else el.removeAttribute('aria-current');
   });
+}
 
-  const recent = sortedProjects().slice(0, 6);
-  const recentList = h('ul', { class: 'recent-list' });
-  if (!recent.length) {
-    recentList.append(h('li', { class: 'list-empty' }, '최근 작업이 없습니다.'));
-  }
-  for (const p of recent) {
-    recentList.append(h('li', null, h('button', { type: 'button', class: 'recent-item', onclick: () => openProject(p.id) },
-      h('span', { class: `type-tag t-${TYPES.includes(p.type) ? p.type : 'other'}` }, TYPE_LABELS[p.type] || '기타'),
-      h('span', { class: 'ri-title' }, p.title || '제목 없음'),
-      h('span', { class: 'ri-date' }, formatDate(p.updatedAt)),
-    )));
-  }
+async function launchTool(id) {
+  if (S.cur) { switchTab(id); closeDrawer(); return; }
+  await createToolProject(id);
+}
 
-  const ai = !!(S.status && S.status.ai && S.status.ai.configured);
-  UI.main.append(h('div', { class: 'home' },
-    h('section', { class: 'home-desk', 'aria-labelledby': 'home-title' },
-      h('p', { class: 'eyebrow' }, new Intl.DateTimeFormat('ko-KR', { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date())),
-      h('h1', { id: 'home-title', class: 'home-title' }, `${name}님의 책상`),
-      h('p', { class: 'muted' }, '대본을 다듬고, 장면을 나누고, 썸네일을 직접 꾸미는 개인 작업 공간입니다.'),
-      quick,
-      qErr,
-    ),
-    h('div', { class: 'home-cols' },
-      h('section', { class: 'panel', 'aria-labelledby': 'recent-heading' },
-        h('h2', { id: 'recent-heading', class: 'panel-title' }, icon('clock'), '최근 작업'),
-        recentList,
-      ),
-      h('section', { class: 'panel', 'aria-labelledby': 'now-heading' },
-        h('h2', { id: 'now-heading', class: 'panel-title' }, icon('server'), '지금 이 작업실은'),
-        h('ul', { class: 'fact-list' },
-          h('li', null, h('span', { class: 'fact-k' }, '저장'), h('span', null, '현재 접속한 서버의 SQLite + 이미지 파일')),
-          h('li', null, h('span', { class: 'fact-k' }, '다른 기기'), h('span', null, S.status?.deployment === 'local' ? '배포 후 같은 주소로 접속 · 지금은 백업 이동 가능' : '같은 HTTPS 주소와 소유자 계정으로 접속')),
-          h('li', null, h('span', { class: 'fact-k' }, 'AI'), h('span', null, ai ? 'API 키 설정됨 · 생성 전 전송·비용 확인' : '상단 AI 연결 설정에서 키 등록')),
-          h('li', null, h('span', { class: 'fact-k' }, '직접 가능'), h('span', null, '대본·스토리보드, 프롬프트 작업대, 이미지 합성·스케치, 상세페이지 PNG·ZIP')),
-        ),
-        h('button', { type: 'button', class: 'btn btn-quiet btn-sm', onclick: openSettings }, icon('settings', 'icon-sm'), h('span', null, '자세히 보기')),
-      ),
-    ),
-  ));
+async function createToolProject(id, title = '') {
+  const tool = FEATURE_TOOLS.find(t => t.id === id);
+  if (!tool && id !== 'detail') return;
+  if (!(await confirmLeave())) return;
+  try {
+    const toolName = tool?.name || '상세페이지 제작';
+    const res = await studioApi.createProject({ title: title.trim() || toolName + ' · ' + new Intl.DateTimeFormat('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date()), type: id === 'detail' ? 'product' : id === 'storyboard' ? 'story' : 'image', description: '' });
+    await afterCreate(res.project);
+    switchTab(id);
+    if (S.cur?.dirty) await save();
+  } catch(err) { handleError(err, '새 작업을 만들지 못했습니다: '); }
 }
 
 // ======================================================================
