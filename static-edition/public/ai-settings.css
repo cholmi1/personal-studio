@@ -1,3 +1,14 @@
 .ai-settings .ai-warning{padding:12px 14px;border:1px solid var(--border,#d9d3c6);border-radius:8px;background:var(--surface-soft,#f8f3e7);line-height:1.7}.ai-provider-grid,.ai-option-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.ai-provider{padding:14px;border:1px solid var(--border,#d9d3c6);border-radius:10px;min-width:0}.ai-provider h3{margin-top:0}.ai-key-status{font-size:.8rem;color:var(--muted,#686b60)}.ai-test-result{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.82rem;max-height:180px;overflow:auto}.ai-settings .field{min-width:0}.ai-settings .field .input{width:100%}.ai-settings .check{align-items:flex-start;line-height:1.6}.ai-connect-chip{cursor:pointer;font:inherit}.ai-connect-chip.is-ready{color:#355a3c;background:#e7eee1}@media(max-width:640px){.ai-provider-grid,.ai-option-grid{grid-template-columns:1fr}}
 .ai-settings .ai-warning.ai-risk{border-color:#a8513a;background:#351b1b;color:#ffd9d2}
 .ai-settings .ai-warning{color:inherit}
+
+/* \uc774\ubbf8\uc9c0 \ubaa8\ub378 \uc120\ud0dd\u00b7\ubb34\ub8cc \uae30\uc900 \uc548\ub0b4: \ud14c\ub9c8 \ubcc0\uc218 \ub300\uc2e0 \uba85\uc2dc\uc801\uc778 \uc5b4\ub450\uc6b4 \uc0c9\ub9cc \uc4f4\ub2e4(\uc815\uc758\ub418\uc9c0 \uc54a\uc740 \ubcc0\uc218\uac00 \ud06c\ub9ac\ubc0c \ubc30\uacbd\uc744 \ub9cc\ub4e0 \uc801\uc774 \uc788\ub2e4). */
+.ai-settings .ai-model-field{display:grid;gap:6px;min-width:0}
+.ai-settings .ai-model-field select,.ai-settings .ai-model-field input{width:100%;min-width:0;background:#0c0c0e;color:#f0f0f5;border:1px solid #3a3a42}
+.ai-settings .ai-model-field select option{background:#16161a;color:#f0f0f5}
+.ai-settings .ai-cost-hint{color:#d9c8a0;background:#1b1710;border:1px solid #4a3a1c;border-radius:8px;padding:8px 12px;line-height:1.7;overflow-wrap:anywhere}
+.ai-settings .ai-free-note{background:#14161a;border:1px solid #34414d;border-radius:10px;padding:12px 16px;color:#d6dde4}
+.ai-settings .ai-free-note h3{margin:0 0 8px;font-size:14px;color:#9fd2ff}
+.ai-settings .ai-free-note .ai-free-asof{font-weight:400;font-size:12px;color:#8fa3b5}
+.ai-settings .ai-free-note ul{margin:0;padding-left:18px;display:grid;gap:6px;font-size:12.5px;line-height:1.7}
+.ai-settings .ai-free-note li{color:#d6dde4}

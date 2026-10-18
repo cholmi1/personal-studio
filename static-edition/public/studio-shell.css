@@ -104,3 +104,9 @@ button:active:not(:disabled){transform:translateY(1px)}
 .studio-safe-note .icon{color:#ffb331;margin-top:3px;flex:none}
 .studio-safe-note strong{font-size:13px;color:#ffd48a}
 .studio-safe-note p{margin-top:5px;font-size:11.5px;line-height:1.8;color:#cbbd9f}
+
+/* AI settings dialog: ai-settings.css falls back to a cream surface when a theme variable is missing; keep it dark. */
+.ai-settings .ai-warning{background:#1d1b17;color:#d7d3c9;border-color:#3a352b}
+.ai-settings .ai-warning.ai-risk{background:#351b1b;border-color:#a8513a;color:#ffd9d2}
+.ai-settings .ai-provider{background:#16151a;border-color:#34333b;color:#e4e4ea}
+.ai-settings .ai-key-status{color:#a9a9b4}

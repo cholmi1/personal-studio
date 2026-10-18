@@ -5,6 +5,7 @@ import { assetUrl } from './api.js';
 import { openSketchPad as sketchPad } from './sketch.js';
 import { makeScene, scenesToCsv } from './story.js';
 import { splitIntoCount } from './story-split.js';
+import { IMAGE_MODELS, FREE_NOTE, findModel, isKnownModel, qualitiesFor, estimateImageCost } from './model-catalog.js';
 
 export const FEATURE_TOOLS = [
   { id: 'canvas', name: '디렉터 캔버스', desc: '스케치와 화풍으로 나만의 장면 완성', icon: 'pen' },
@@ -53,6 +54,11 @@ export function renderFeatureStudio(root, toolId, ctx) {
   st.prompt = text(st.prompt); st.style = STYLES.some(s => s[0] === st.style) ? st.style : 'photo';
   st.ratio = RATIOS.includes(st.ratio) ? st.ratio : tool.id === 'signature' ? '9:16' : '1:1';
   st.depth = ['auto', 'sharp', 'blur'].includes(st.depth) ? st.depth : 'auto';
+  // 이미지 모델·품질은 도구별로 저장한다. 목록에 없는 값이면 저장된 AI 설정의 기본값(목록에 있을 때) 또는 목록의 첫 모델로 되돌린다. config 는 아직 없을 수 있다.
+  const defaultModelId = () => { const m = ctx.ai?.config?.imageModel; return isKnownModel(m) ? m : IMAGE_MODELS[0].id; };
+  const defaultQuality = (model) => { const q = ctx.ai?.config?.quality; return qualitiesFor(model).includes(q) ? q : 'low'; };
+  st.model = typeof st.model === 'string' && isKnownModel(st.model) ? st.model : defaultModelId();
+  st.quality = typeof st.quality === 'string' && qualitiesFor(st.model).includes(st.quality) ? st.quality : defaultQuality(st.model);
   st.refIds = Array.isArray(st.refIds) ? st.refIds.slice(0, 8) : [];
   if (tool.id === 'compose') {
     st.mode = st.mode === 'reference' ? 'reference' : 'multi';
@@ -126,7 +132,7 @@ export function renderFeatureStudio(root, toolId, ctx) {
     if (!customPrompt.trim() || !st.prompt.trim() && tool.id === 'signature') throw new Error('생성할 장면을 프롬프트에 입력해 주세요.');
     const refs = unique(ids).filter(id => asset(id));
     if (refs.length > 4) throw new Error('현재 이미지 API에는 서로 다른 참조 이미지를 최대 4장까지 전송할 수 있습니다. 영역은 8개까지 배치할 수 있지만, 서로 다른 이미지는 4장 이하로 줄여 주세요.');
-    const result = await ctx.ai.image({ prompt: customPrompt, assetIds: refs, size: sizeFor(st.ratio) });
+    const result = await ctx.ai.image({ prompt: customPrompt, assetIds: refs, size: sizeFor(st.ratio), model: st.model, quality: st.quality });
     if (result?.asset && current()) { save('resultAssetId', result.asset.id); ctx.notify('결과를 이 작업의 자료함에 저장했습니다.', 'success'); }
   }
   function resultPanel(emptyText = '설정을 선택하고 프롬프트를 입력해 주세요.') {
@@ -137,8 +143,39 @@ export function renderFeatureStudio(root, toolId, ctx) {
         busy ? h('div', { class: 'fs-loading' }, h('span'), h('strong', null, currentAction), h('small', null, '완료될 때까지 이 작업을 열어 두세요.')) : null),
       output ? h('div', { class: 'fs-result-actions' }, h('a', { class: 'fs-btn', href: assetUrl(output), download: output.name }, icon('download'), 'PNG 다운로드'), btn('이미지 편집기 열기', () => ctx.switchTab('image'), 'fs-quiet', 'layers')) : null);
   }
+  // 무료 기준 안내(접힌 상태). 내용은 model-catalog.js 의 FREE_NOTE 하나만 쓴다.
+  function freeNoteDetails() {
+    return h('details', { class: 'fs-free-note' }, h('summary', null, FREE_NOTE.title),
+      h('ul', null, ...FREE_NOTE.items.map(t => h('li', null, t))),
+      h('p', { class: 'fs-hint' }, `확인 기준일 ${FREE_NOTE.asOf} · 모델별 안내는 설정의 AI 연결 설정에서도 볼 수 있습니다.`));
+  }
+  // 이번 생성에 쓸 이미지 모델·품질 선택과 장당 금액 어림. 값 변경은 화면 전체를 다시 그리지 않고 제자리에서 갱신해 포커스를 유지한다.
+  function modelControls({ size = sizeFor(st.ratio), refCount = 0 } = {}) {
+    const estimate = h('p', { class: 'fs-cost', role: 'status' });
+    const quality = h('select', { class: 'fs-input fs-select', 'aria-label': '품질', disabled: busy });
+    const updateEstimate = () => {
+      const est = estimateImageCost({ model: st.model, quality: st.quality, size, refCount });
+      const m = findModel(st.model);
+      estimate.textContent = est.amount != null ? '예상 ' + est.text : est.text;
+      estimate.title = m && m.tokenNote ? m.tokenNote : '';
+    };
+    const fillQuality = () => { clear(quality); for (const v of qualitiesFor(st.model)) quality.append(h('option', { value: v, selected: v === st.quality }, v)); };
+    const model = h('select', { class: 'fs-input fs-select', 'aria-label': '이미지 모델', disabled: busy, onchange: e => {
+      save('model', e.target.value);
+      if (!qualitiesFor(st.model).includes(st.quality)) save('quality', defaultQuality(st.model));
+      fillQuality(); updateEstimate();
+    } }, ...IMAGE_MODELS.map(m => h('option', { value: m.id, selected: m.id === st.model }, `${m.label} · ${m.tag}`)));
+    quality.addEventListener('change', e => { save('quality', e.target.value); updateEstimate(); });
+    fillQuality(); updateEstimate();
+    return h('div', { class: 'fs-model-block' },
+      h('div', { class: 'fs-model-row' },
+        h('label', { class: 'fs-model-field' }, h('span', { class: 'fs-label' }, '이미지 모델'), model),
+        h('label', { class: 'fs-model-field fs-quality-field' }, h('span', { class: 'fs-label' }, '품질'), quality)),
+      estimate, freeNoteDetails());
+  }
+  const refCountNow = () => unique([st.inputAssetId, ...(Array.isArray(st.refIds) ? st.refIds : []), ...(Array.isArray(st.regions) ? st.regions.map(r => r && r.assetId) : [])]).filter(id => asset(id)).length;
   function generationFooter(label, fn) {
-    return h('div', { class: 'fs-generate-block' }, btn(label, () => action(label, fn), 'fs-primary', 'pen'), hint('생성 전 이미지 외부 전송과 API 비용을 별도로 확인합니다.'));
+    return h('div', { class: 'fs-generate-block' }, modelControls({ size: sizeFor(st.ratio), refCount: refCountNow() }), btn(label, () => action(label, fn), 'fs-primary', 'pen'), hint('유료 요청입니다. 생성 전 이미지 외부 전송과 API 비용을 별도로 확인합니다.'));
   }
   function drawSignature(body) {
     const random = h('input', { type: 'checkbox', checked: !!st.randomSeed, disabled: busy, onchange: e => { save('randomSeed', e.target.checked); if (e.target.checked) save('seed', Math.floor(Math.random() * 2147483647)); rerender(); } });
@@ -272,6 +309,7 @@ export function renderFeatureStudio(root, toolId, ctx) {
       h('div', { class: 'fs-action-row' }, btn('대본 장면 나누기', () => action('대본 분할 중', split), '', 'scissors'), btn('AI 스토리보드 기획', () => action('AI 장면 기획 중', aiPlan), 'fs-primary', 'scenes')),
       hint('직접 나누기는 무료 로컬 기능입니다. AI 기획은 Gemini에 대본과 선택 사진을 전송하며 비용을 확인합니다.'));
     const scenesPanel = panel(h('div', { class: 'fs-toolbar' }, title(`스토리보드 · ${story.scenes.length}개 장면`, 'scenes'), btn('CSV 내려받기', () => { if (!story.scenes.length) { ctx.notify('먼저 대본을 장면으로 나눠 주세요.', 'info'); return; } downloadBlob(new Blob([scenesToCsv(story.scenes, story.characters || [])], { type: 'text/csv;charset=utf-8' }), '스토리보드.csv'); }, '', 'download'), btn('대본·장면 편집기', () => ctx.switchTab('story'), 'fs-quiet', 'pen')));
+    if (story.scenes.length) scenesPanel.append(modelControls({ size: '1536x1024', refCount: st.refIds.filter(id => asset(id)).slice(0, 4).length }));
     if (!story.scenes.length) scenesPanel.append(h('div', { class: 'fs-board-empty' }, icon('scenes'), h('p', null, '대본을 입력하면 장면별 스토리보드를 만들 수 있습니다.')));
     else scenesPanel.append(h('div', { class: 'fs-scene-grid' }, ...story.scenes.map((scene, i) => {
       const a = asset(scene.assetId); const imgPrompt = scene.imagePrompt || scene.prompt || scene.narration;
@@ -279,7 +317,7 @@ export function renderFeatureStudio(root, toolId, ctx) {
         h('div', { class: 'fs-scene-copy' }, h('h4', null, scene.title), h('p', null, scene.narration), textarea('imagePrompt', `장면 ${i + 1} 이미지 프롬프트`, '이미지 생성에 사용할 상세 묘사를 입력해 주세요.', 3, 4000, scene),
           h('div', { class: 'fs-action-row' }, btn('장면 이미지 생성', () => action(`장면 ${i + 1} 생성 중`, async () => {
             const value = (scene.imagePrompt || scene.prompt || scene.narration || '').trim(); if (!value) throw new Error('장면 이미지 프롬프트를 입력해 주세요.');
-            const r = await ctx.ai.image({ prompt: `Create a cinematic storyboard frame. Maintain character identity from references.\n${value}`, assetIds: st.refIds.filter(id => asset(id)).slice(0, 4), size: '1536x1024' });
+            const r = await ctx.ai.image({ prompt: `Create a cinematic storyboard frame. Maintain character identity from references.\n${value}`, assetIds: st.refIds.filter(id => asset(id)).slice(0, 4), size: '1536x1024', model: st.model, quality: st.quality });
             if (r?.asset && current()) { scene.assetId = r.asset.id; dirty(); }
           }), 'fs-primary', 'image'), btn('복사', () => copy(imgPrompt), 'fs-quiet', 'note'))));
     })));

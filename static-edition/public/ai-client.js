@@ -3,6 +3,8 @@
 // 작업 DB와 분리되어 작업 백업에는 절대 들어가지 않는다. 키를 로그·URL·오류 메시지에 남기지 않는다.
 // 의존성(fetch, 저장소, 자료 접근, 시계)은 createAiClient 로 주입할 수 있다(테스트용).
 
+import { qualitiesFor } from './model-catalog.js';
+
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const OPENAI_BASE = 'https://api.openai.com/v1';
 const MiB = 1024 * 1024;
@@ -200,7 +202,8 @@ export function createAiClient({ fetchImpl, storage, assets, now, errorClass } =
       }
     }
     if (b.quality !== undefined) {
-      if (!['low', 'medium', 'high', 'auto'].includes(b.quality)) fail('이미지 품질을 확인해 주세요.');
+      // 기본 품질은 (새로 고른) 기본 이미지 모델이 지원하는 값이어야 한다. xhigh·max 는 2.5 계열만 지원한다.
+      if (typeof b.quality !== 'string' || !qualitiesFor(settings.imageModel).includes(b.quality)) fail('이미지 품질을 확인해 주세요.');
       settings.quality = b.quality;
     }
     for (const k of ['dailyImageLimit', 'dailyTextLimit']) {
@@ -337,24 +340,30 @@ export function createAiClient({ fetchImpl, storage, assets, now, errorClass } =
     });
   }
 
-  async function aiImage({ projectId, prompt, assetIds, size = '1024x1024', quality } = {}) {
+  // model·quality 를 호출마다 고를 수 있다. 검증에 실패하면 제공자 호출도, 일일 한도 사용도 없다.
+  async function aiImage({ projectId, prompt, assetIds, size = '1024x1024', quality, model } = {}) {
     if (typeof projectId !== 'string' || !projectId) fail('먼저 작업을 열어 주세요.');
     validatePrompt(prompt);
     const all = await loadAll();
     const h = authHeaders(all, 'openai');
     if (!['1024x1024', '1536x1024', '1024x1536'].includes(size)) fail('지원하지 않는 이미지 크기입니다.');
-    const q = quality ?? all.settings.quality;
-    if (!['low', 'medium', 'high', 'auto'].includes(q)) fail('품질 설정이 올바르지 않습니다.');
+    const useModel = model ?? all.settings.imageModel;
+    if (typeof useModel !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(useModel)) fail('모델 이름 형식이 올바르지 않습니다.');
+    if (!/^(gpt-image-|chatgpt-image-)/.test(useModel)) fail('GPT 이미지 모델을 선택해 주세요.');
+    const allowed = qualitiesFor(useModel);
+    // 호출에서 품질을 정하지 않았고 저장된 기본 품질을 이 모델이 지원하지 않으면 가장 싼 low 로 내려 보낸다.
+    const q = quality ?? (allowed.includes(all.settings.quality) ? all.settings.quality : 'low');
+    if (typeof q !== 'string' || !allowed.includes(q)) fail('품질 설정이 올바르지 않습니다.');
     const refs = await loadRefs(projectId, assetIds, true);
     const generated = await run('images', all, async () => {
       let body; let url; const headers = { ...h };
       if (refs.length) {
         url = `${OPENAI_BASE}/images/edits`; body = new FormData();
-        for (const [k, v] of Object.entries({ model: all.settings.imageModel, prompt, size, quality: q, n: '1', output_format: 'png' })) body.append(k, v);
+        for (const [k, v] of Object.entries({ model: useModel, prompt, size, quality: q, n: '1', output_format: 'png' })) body.append(k, v);
         refs.forEach((r, i) => body.append('image[]', new Blob([r.bytes], { type: r.mime }), `reference-${i}.${String(r.mime).split('/')[1]}`));
       } else {
         url = `${OPENAI_BASE}/images/generations`; headers['Content-Type'] = 'application/json';
-        body = JSON.stringify({ model: all.settings.imageModel, prompt, size, quality: q, n: 1, output_format: 'png' });
+        body = JSON.stringify({ model: useModel, prompt, size, quality: q, n: 1, output_format: 'png' });
       }
       const j = await remote(url, { method: 'POST', headers, body });
       const b64 = j.data?.[0]?.b64_json;
@@ -365,7 +374,7 @@ export function createAiClient({ fetchImpl, storage, assets, now, errorClass } =
       return { bytes };
     });
     const asset = await assetApi.addAssetFromBytes(projectId, 'AI 생성 이미지.png', 'image/png', generated.bytes);
-    return { asset, usage: generated.usage };
+    return { asset, usage: generated.usage, model: useModel, quality: q };
   }
 
   // 모든 공개 함수는 첫 호출 때 ApiError 클래스를 읽어 오고, 오류 메시지에서 키를 한 번 더 지운다.

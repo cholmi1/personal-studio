@@ -182,3 +182,19 @@
 @media(max-width:1150px){.feature-studio .fs-compose-grid{grid-template-columns:minmax(0,1fr)}.feature-studio .fs-compose-result>.fs-panel{position:static}.feature-studio .fs-compose-result .fs-result{min-height:300px}.feature-studio .fs-split{grid-template-columns:280px minmax(0,1fr);gap:20px}.feature-studio .fs-director{grid-template-columns:250px minmax(0,1fr);gap:20px}.feature-studio .fs-body{padding:22px}.feature-studio .fs-options{gap:4px}.feature-studio .fs-option small{font-size:7px}}
 @media(max-width:800px){.feature-studio{border-radius:16px;min-height:0}.feature-studio .fs-header{padding:20px;gap:12px}.feature-studio .fs-header h2{font-size:20px}.feature-studio .fs-local-badge{display:none}.feature-studio .fs-body{padding:18px}.feature-studio .fs-split,.feature-studio .fs-director{grid-template-columns:minmax(0,1fr)}.feature-studio .fs-director-settings{border-right:0;border-bottom:1px solid #29292f;padding-right:0;padding-bottom:24px}.feature-studio .fs-director-settings .fs-styles{grid-template-columns:repeat(5,minmax(0,1fr))}.feature-studio .fs-pair{grid-template-columns:minmax(0,1fr);gap:24px}.feature-studio .fs-convert-options{grid-template-columns:minmax(0,1fr)}.feature-studio .fs-result{min-height:360px}.feature-studio .fs-sketch-empty{min-height:420px}.feature-studio .fs-upload{min-height:300px}.feature-studio .fs-scene-grid{grid-template-columns:minmax(0,1fr)}.feature-studio .fs-storyboard>.fs-panel{padding:18px}.feature-studio .fs-conversion>.fs-generate-block{max-width:none}.feature-studio .fs-mode-switch{width:100%}.feature-studio .fs-mode-switch .fs-btn{font-size:10px;flex:1;padding:10px 8px}.feature-studio .fs-region-row{grid-template-columns:20px minmax(0,1fr) 35px}.feature-studio .fs-region-row>input{grid-column:2;grid-row:2}.feature-studio .fs-region-row>.fs-btn{grid-column:3;grid-row:1 / 3}}
 @media(prefers-reduced-motion:reduce){.feature-studio *{transition:none!important;animation:none!important}.feature-studio .fs-loading>span:after{transform:scaleX(.65)}}
+
+/* \uc774\ubbf8\uc9c0 \ubaa8\ub378\u00b7\ud488\uc9c8 \uc120\ud0dd, \uae08\uc561 \uc5b4\ub9bc, \ubb34\ub8cc \uae30\uc900 \uc548\ub0b4 */
+.feature-studio .fs-model-block{display:grid;gap:8px;margin:0 0 4px;padding:12px;border:1px solid #2d2d32;border-radius:12px;background:#0d0d10}
+.feature-studio .fs-model-row{display:grid;grid-template-columns:minmax(0,1fr) 92px;gap:8px;align-items:end}
+.feature-studio .fs-model-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.feature-studio .fs-model-field .fs-label{font-size:11px;color:#c9c9d3}
+.feature-studio .fs-model-field .fs-select{min-height:36px;padding:6px 8px;font-size:11px;background:#0a0a0c;color:#e9e9ef;text-overflow:ellipsis}
+.feature-studio .fs-model-field .fs-select option{background:#16161a;color:#e9e9ef}
+.feature-studio .fs-cost{margin:0;font-size:11px;line-height:1.6;color:#e2c98f}
+.feature-studio .fs-free-note{border-top:1px dashed #33333a;padding-top:8px;color:#c4c4cf}
+.feature-studio .fs-free-note summary{cursor:pointer;font-size:11px;font-weight:700;color:#9fd2ff;list-style-position:inside}
+.feature-studio .fs-free-note summary:focus-visible{outline:2px solid var(--fs-accent);outline-offset:2px}
+.feature-studio .fs-free-note ul{margin:8px 0 0;padding-left:18px;display:grid;gap:5px;font-size:10.5px;line-height:1.7;color:#c4c4cf}
+.feature-studio .fs-free-note .fs-hint{margin:6px 0 0}
+.feature-studio .fs-scene-copy ~ .fs-model-block,.feature-studio .fs-storyboard .fs-model-block{margin-top:16px}
+@media(max-width:800px){.feature-studio .fs-model-row{grid-template-columns:minmax(0,1fr) 84px}}

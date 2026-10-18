@@ -275,3 +275,78 @@ test('키 저장 위치: 기억 켜면 설정 DB, 끄면 세션에만, 빈 키 �
   assert.equal(cfg.openaiConfigured, false);
   assert.equal(cfg.dailyImageLimit, 10);
 });
+
+// ---- 이미지 모델·품질 호출별 선택 -------------------------------------------------
+const okImage = async () => json({ data: [{ b64_json: bytesToBase64(PNG) }] });
+
+test('model/quality 덮어쓰기: 요청 본문에 반영, 저장된 기본값은 그대로, 결과에 model 포함', async () => {
+  const s = setup({ fetchImpl: okImage });
+  await withKeys(s);
+  const r = await s.client.aiImage({ projectId: 'p1', prompt: '숲', model: 'gpt-image-1-mini', quality: 'medium' });
+  assert.deepEqual(JSON.parse(s.calls[0].init.body), { model: 'gpt-image-1-mini', prompt: '숲', size: '1024x1024', quality: 'medium', n: 1, output_format: 'png' });
+  assert.equal(r.model, 'gpt-image-1-mini');
+  assert.equal(r.quality, 'medium');
+  const cfg = await s.client.aiConfig();
+  assert.equal(cfg.imageModel, 'gpt-image-1');
+  assert.equal(cfg.quality, 'low');
+  // 덮어쓰기를 안 하면 저장된 기본값을 쓴다.
+  const r2 = await s.client.aiImage({ projectId: 'p1', prompt: '숲' });
+  assert.equal(JSON.parse(s.calls[1].init.body).model, 'gpt-image-1');
+  assert.equal(r2.model, 'gpt-image-1');
+});
+
+test('model 덮어쓰기는 참조 편집(FormData)에도 적용', async () => {
+  const s = setup({ fetchImpl: okImage });
+  await withKeys(s);
+  addFile(s.files, 'a1', 'p1');
+  await s.client.aiImage({ projectId: 'p1', prompt: '합성', assetIds: ['a1'], model: 'gpt-image-2', quality: 'high' });
+  assert.equal(s.calls[0].url, 'https://api.openai.com/v1/images/edits');
+  assert.equal(s.calls[0].init.body.get('model'), 'gpt-image-2');
+  assert.equal(s.calls[0].init.body.get('quality'), 'high');
+});
+
+test('잘못된 model 은 제공자 호출·한도 사용 없이 같은 한국어 검증 오류', async () => {
+  const s = setup({ fetchImpl: okImage });
+  await withKeys(s);
+  await assert.rejects(() => s.client.aiImage({ projectId: 'p1', prompt: 'x', model: 'dall-e-3' }), (e) => e.code === 'AI_VALIDATION' && e.message === 'GPT 이미지 모델을 선택해 주세요.');
+  await assert.rejects(() => s.client.aiImage({ projectId: 'p1', prompt: 'x', model: 'bad model!' }), (e) => e.code === 'AI_VALIDATION' && e.message === '모델 이름 형식이 올바르지 않습니다.');
+  await assert.rejects(() => s.client.aiImage({ projectId: 'p1', prompt: 'x', model: 123 }), (e) => e.code === 'AI_VALIDATION');
+  assert.equal(s.calls.length, 0);
+  assert.equal((await s.client.aiConfig()).usage.images, 0);
+});
+
+test('xhigh·max 는 2.5 계열에서만 허용, 그 외 모델은 거부(한도 미사용)', async () => {
+  const s = setup({ fetchImpl: okImage });
+  await withKeys(s);
+  await s.client.aiImage({ projectId: 'p1', prompt: 'x', model: 'gpt-image-2.5-sunburst', quality: 'xhigh' });
+  await s.client.aiImage({ projectId: 'p1', prompt: 'x', model: 'gpt-image-2.5-flare', quality: 'max' });
+  assert.equal(JSON.parse(s.calls[0].init.body).quality, 'xhigh');
+  assert.equal(JSON.parse(s.calls[1].init.body).quality, 'max');
+  for (const model of ['gpt-image-1', 'gpt-image-1-mini', 'gpt-image-1.5', 'gpt-image-2']) {
+    await assert.rejects(() => s.client.aiImage({ projectId: 'p1', prompt: 'x', model, quality: 'xhigh' }), (e) => e.code === 'AI_VALIDATION');
+  }
+  assert.equal(s.calls.length, 2);
+  assert.equal((await s.client.aiConfig()).usage.images, 2);
+});
+
+test('목록에 없는 직접 입력 모델 ID 는 표준 품질 4가지만 허용', async () => {
+  const s = setup({ fetchImpl: okImage });
+  await withKeys(s);
+  await s.client.aiImage({ projectId: 'p1', prompt: 'x', model: 'chatgpt-image-latest', quality: 'auto' });
+  assert.equal(JSON.parse(s.calls[0].init.body).model, 'chatgpt-image-latest');
+  await s.client.aiImage({ projectId: 'p1', prompt: 'x', model: 'gpt-image-9-future', quality: 'high' });
+  await assert.rejects(() => s.client.aiImage({ projectId: 'p1', prompt: 'x', model: 'gpt-image-9-future', quality: 'max' }), (e) => e.code === 'AI_VALIDATION');
+  assert.equal(s.calls.length, 2);
+});
+
+test('저장된 기본 품질이 선택한 모델에서 지원되지 않으면 low 로 내려 보냄, 기본 품질 저장은 기본 모델 기준 검증', async () => {
+  const s = setup({ fetchImpl: okImage });
+  await withKeys(s);
+  await assert.rejects(() => s.client.aiSaveConfig({ quality: 'xhigh' }), (e) => e.code === 'AI_VALIDATION'); // 기본 모델 gpt-image-1 은 xhigh 미지원
+  const cfg = await s.client.aiSaveConfig({ imageModel: 'gpt-image-2.5-flare', quality: 'xhigh' });
+  assert.equal(cfg.quality, 'xhigh');
+  await s.client.aiImage({ projectId: 'p1', prompt: 'x', model: 'gpt-image-1' }); // 품질 미지정 + xhigh 저장값
+  assert.equal(JSON.parse(s.calls[0].init.body).quality, 'low');
+  await s.client.aiImage({ projectId: 'p1', prompt: 'x' }); // 기본 모델 2.5 flare + xhigh
+  assert.equal(JSON.parse(s.calls[1].init.body).quality, 'xhigh');
+});

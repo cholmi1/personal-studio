@@ -1,5 +1,6 @@
-import { h } from './dom.js';
+import { h, clear } from './dom.js';
 import { aiConfig, aiSaveConfig, aiTest, aiGemini, aiImage } from './ai-client.js';
+import { IMAGE_MODELS, FREE_NOTE, findModel, isKnownModel, qualitiesFor, estimateImageCost, modelOptionText } from './model-catalog.js';
 
 // 키는 이 브라우저의 설정 저장소(작업 데이터와 분리)에만 보관한다. 호출 때만 Google/OpenAI로 직접 전송한다.
 export function createAiController({ getProjectId, getAssets, addAsset, notify, confirm, openDialog, onChange }) {
@@ -17,10 +18,25 @@ export function createAiController({ getProjectId, getAssets, addAsset, notify, 
     await open();
     if (!ready(provider)) throw new Error((provider === 'gemini' ? 'Gemini' : 'OpenAI') + ' API 키를 먼저 저장해 주세요.');
   }
-  async function approve(provider, assetIds, image) {
-    const model = provider === 'gemini' ? config.geminiModel : config.imageModel;
-    return confirm({ title: image ? '유료 이미지 생성 요청 확인' : 'AI 텍스트 요청 확인', okLabel: image ? '동의하고 이미지 생성' : '동의하고 요청', message:
-      (provider === 'gemini' ? 'Google Gemini' : 'OpenAI') + '에 입력 문구와 선택 사진 ' + assetIds.length + '장을 이 브라우저에서 직접 전송합니다. 모델: ' + model + '. API 사용료가 발생할 수 있으며 구독 요금과 별도입니다. 정확한 금액은 제공자 요금표와 사용량에서 확인해 주세요. 일일 횟수 제한은 금액 상한이 아닙니다. 계속할까요?' });
+  // 이미지 요청은 실제로 보낼 모델·품질·크기와 금액 어림을 함께 보여 준다(저장된 기본값이 아니라 이번 요청의 선택).
+  function imageChoice(args) {
+    const model = args.model || config.imageModel;
+    const allowed = qualitiesFor(model);
+    const quality = args.quality || (allowed.includes(config.quality) ? config.quality : 'low');
+    const size = args.size || '1024x1024';
+    return { model, quality, size };
+  }
+  async function approve(provider, assetIds, image, args = {}) {
+    const who = provider === 'gemini' ? 'Google Gemini' : 'OpenAI';
+    const transfer = who + '에 입력 문구와 선택 사진 ' + assetIds.length + '장을 이 브라우저에서 직접 전송합니다. ';
+    const tail = 'API 사용료가 발생할 수 있으며 구독 요금과 별도입니다. 정확한 금액은 제공자 요금표와 사용량에서 확인해 주세요. 일일 횟수 제한은 금액 상한이 아닙니다. 계속할까요?';
+    if (!image) {
+      return confirm({ title: 'AI 텍스트 요청 확인', okLabel: '동의하고 요청', message: transfer + '모델: ' + config.geminiModel + '. ' + tail });
+    }
+    const c = imageChoice(args);
+    const est = estimateImageCost({ model: c.model, quality: c.quality, size: c.size, refCount: assetIds.length });
+    return confirm({ title: '유료 이미지 생성 요청 확인', okLabel: '동의하고 이미지 생성', message:
+      transfer + '모델: ' + c.model + ' · 품질: ' + c.quality + ' · 크기: ' + c.size.replace('x', '×') + ' · 예상 금액: ' + est.text + '. 이 모델은 무료 구간이 없는 유료 요청입니다. ' + tail });
   }
   async function run(provider, args, image) {
     if (generationBusy) throw new Error('이 화면에서 AI 요청이 진행 중입니다. 완료 후 다시 시도해 주세요.');
@@ -30,7 +46,7 @@ export function createAiController({ getProjectId, getAssets, addAsset, notify, 
     const assetIds = [...new Set(args.assetIds || [])];
     const assets = getAssets();
     if (assetIds.some(id => !assets.some(a => a.id === id))) throw new Error('선택 사진이 현재 자료함에 없습니다. 다시 선택해 주세요.');
-    if (!await approve(provider, assetIds, image)) return null;
+    if (!await approve(provider, assetIds, image, args)) return null;
     if (getProjectId() !== projectId) throw new Error('열린 작업이 바뀌었습니다. 새 작업에서 다시 요청해 주세요.');
     generationBusy = true;
     try {
@@ -70,8 +86,34 @@ export function createAiController({ getProjectId, getAssets, addAsset, notify, 
         return { input, wrap: h('label', { class: 'field' }, h('span', null, label), input) };
       };
       const geminiModel = optionField('Gemini 모델', config.geminiModel);
-      const imageModel = optionField('이미지 모델', config.imageModel);
-      const quality = h('select', { class: 'input' }, ...['low', 'medium', 'high', 'auto'].map(v => h('option', { value: v, selected: v === config.quality }, v)));
+      // 이미지 모델: 목록에서 고르거나 '직접 입력'으로 다른 ID를 적는다. 품질 목록은 선택한 모델이 지원하는 것만 보여 준다.
+      const knownNow = isKnownModel(config.imageModel);
+      const modelSelect = h('select', { class: 'input', 'aria-label': '이미지 모델' },
+        ...IMAGE_MODELS.map(m => h('option', { value: m.id, selected: m.id === config.imageModel }, modelOptionText(m))),
+        h('option', { value: '__custom', selected: !knownNow }, '직접 입력(다른 모델 ID)'));
+      const customModel = h('input', { class: 'input', type: 'text', maxLength: 100, 'aria-label': '이미지 모델 ID 직접 입력', placeholder: '예: chatgpt-image-latest', value: knownNow ? '' : config.imageModel, hidden: knownNow });
+      const imageModel = { wrap: h('div', { class: 'field ai-model-field' }, h('span', null, '이미지 모델'), modelSelect, customModel) };
+      const currentModel = () => (modelSelect.value === '__custom' ? customModel.value.trim() : modelSelect.value);
+      const quality = h('select', { class: 'input', 'aria-label': '이미지 품질' });
+      const costHint = h('p', { class: 'hint ai-cost-hint', role: 'status' });
+      const refreshQuality = () => {
+        const model = currentModel();
+        const allowed = qualitiesFor(model);
+        const keep = allowed.includes(quality.value) ? quality.value : (allowed.includes(config.quality) ? config.quality : 'low');
+        clear(quality);
+        for (const v of allowed) quality.append(h('option', { value: v, selected: v === keep }, v));
+        const est = estimateImageCost({ model, quality: quality.value, size: '1024x1024' });
+        const m = findModel(model);
+        costHint.textContent = '1024×1024 기준 예상: ' + est.text + (m && m.tokenNote ? ' · ' + m.tokenNote : '') + (m ? '' : ' · 목록에 없는 모델이라 금액을 어림하지 못합니다.');
+      };
+      modelSelect.addEventListener('change', () => { customModel.hidden = modelSelect.value !== '__custom'; refreshQuality(); });
+      customModel.addEventListener('input', refreshQuality);
+      quality.addEventListener('change', refreshQuality);
+      quality.value = config.quality;
+      refreshQuality();
+      const freeNote = h('section', { class: 'ai-free-note', 'aria-label': FREE_NOTE.title },
+        h('h3', null, FREE_NOTE.title, h('span', { class: 'ai-free-asof' }, ' · 확인 기준일 ' + FREE_NOTE.asOf)),
+        h('ul', null, ...FREE_NOTE.items.map(t => h('li', null, t))));
       const dailyImages = optionField('하루 이미지 요청 한도', config.dailyImageLimit, 'number');
       const dailyText = optionField('하루 텍스트 요청 한도', config.dailyTextLimit, 'number');
       const result = h('p', { class: 'ai-test-result', role: 'status' });
@@ -83,7 +125,8 @@ export function createAiController({ getProjectId, getAssets, addAsset, notify, 
         h('p', { class: 'ai-warning ai-risk' }, '키는 이 브라우저에만 저장되며 암호화되지 않습니다. 이 브라우저 프로필을 쓰는 다른 사람이나 악성 확장 프로그램이 읽을 수 있습니다. 제공자 화면에서 사용 한도(예산)를 정한 제한 키를 만들어 쓰고, 공용 PC에서는 사용하지 마세요. 작업 백업과 앱 소스에는 키가 들어가지 않습니다.'),
         h('div', { class: 'ai-provider-grid' }, geminiKey.wrap, openaiKey.wrap),
         h('label', { class: 'check' }, remember, '이 브라우저에 키 기억하기 (끄면 이 탭을 닫을 때 키가 사라집니다)'),
-        h('div', { class: 'ai-option-grid' }, geminiModel.wrap, imageModel.wrap, h('label', { class: 'field' }, h('span', null, '이미지 품질'), quality), dailyImages.wrap, dailyText.wrap),
+        h('div', { class: 'ai-option-grid' }, geminiModel.wrap, imageModel.wrap, h('label', { class: 'field' }, h('span', null, '이미지 품질(기본값)'), quality), dailyImages.wrap, dailyText.wrap),
+        costHint, freeNote,
         usage, h('label', { class: 'check' }, consent, '저장된 키를 해당 AI 제공자(Google 또는 OpenAI)에게 직접 보내 연결 확인하는 데 동의합니다.'),
         h('p', { class: 'hint' }, '새 키는 먼저 저장하세요. 연결 확인은 저장된 키로 모델 목록을 조회하며 실제 생성 성공·잔여 금액을 보장하지 않습니다.'), result);
       await openDialog({ title: 'AI 연결 설정', content, className: 'dialog-wide', initialFocus: 'input', actions: [
@@ -100,7 +143,7 @@ export function createAiController({ getProjectId, getAssets, addAsset, notify, 
             if (value === 'save') {
               const images = Number(dailyImages.input.value), text = Number(dailyText.input.value);
               if (!Number.isInteger(images) || images < 0 || !Number.isInteger(text) || text < 0) throw new Error('하루 한도는 0 이상의 정수로 입력해 주세요.');
-              update(await aiSaveConfig({ geminiKey: geminiKey.input.value.trim(), openaiKey: openaiKey.input.value.trim(), removeGemini: geminiKey.remove.checked, removeOpenai: openaiKey.remove.checked, rememberKeys: remember.checked, geminiModel: geminiModel.input.value.trim(), imageModel: imageModel.input.value.trim(), quality: quality.value, dailyImageLimit: images, dailyTextLimit: text }));
+              update(await aiSaveConfig({ geminiKey: geminiKey.input.value.trim(), openaiKey: openaiKey.input.value.trim(), removeGemini: geminiKey.remove.checked, removeOpenai: openaiKey.remove.checked, rememberKeys: remember.checked, geminiModel: geminiModel.input.value.trim(), imageModel: currentModel(), quality: quality.value, dailyImageLimit: images, dailyTextLimit: text }));
               geminiKey.input.value = ''; openaiKey.input.value = ''; geminiKey.remove.checked = false; openaiKey.remove.checked = false;
               syncStatus();
               result.textContent = '저장했습니다. 연결 확인 후 실제 기능을 테스트해 주세요.';
