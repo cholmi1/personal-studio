@@ -1,4 +1,4 @@
-// 프롬프트·AI 탭. 프롬프트를 조립해 복사하는 작업대와 AI 도구 연결 현황. AI 를 호출하지 않는다.
+// 프롬프트·AI 탭. 프롬프트를 조립해 복사하는 작업대와 AI 도구 연결 현황. 서버 경유 AI 호출과 수동 복사를 함께 지원한다.
 import { h, clear } from './dom.js';
 import { icon } from './icons.js';
 import {
@@ -43,6 +43,47 @@ export function renderPromptLab(root, ctx) {
   pl.characterIds = (pl.characterIds || []).filter((id) => characters.some((c) => c.id === id));
 
   const changed = () => { ctx.markDirty(); update(); };
+  const refs = new Set();
+  const generated = h('div', { class: 'pl-generated', role: 'status', 'aria-live': 'polite' });
+  const imageTools = [
+    '',
+    'Compose a coherent new image using the selected reference images. Preserve the identity of the main subject.',
+    'Convert the reference illustration into a photorealistic photograph, preserving composition and identity.',
+    'Convert the reference photograph into an anime illustration, preserving composition and identity.',
+    'Turn the reference sketch into a finished illustration, preserving the original composition.',
+    'Improve the reference image for a clear, compelling thumbnail. Preserve identity and factual product appearance.',
+  ];
+  function generateButton(label, index = 0, small = false) {
+    const btn = h('button', { type: 'button', class: 'btn btn-ai' + (small ? ' btn-sm' : ''), onclick: async () => {
+      if (!ctx.ai?.ready('openai')) { ctx.ai?.open(); return; }
+      if (btn.disabled) return;
+      update();
+      if (!index && !last.positive.trim()) { ctx.notify('장면 묘사나 스타일을 먼저 입력해 주세요.', 'error'); return; }
+      if (index && !refs.size) { ctx.notify('참조 이미지를 한 장 이상 선택해 주세요.', 'error'); return; }
+      btn.disabled = true; btn.setAttribute('aria-busy', 'true');
+      try {
+        const parts = String(pl.ratio).split(':').map(Number);
+        const result = await ctx.ai.image({ prompt: [imageTools[index], last.positive, last.negative ? 'Avoid: ' + last.negative : '', 'Requested composition ratio: ' + pl.ratio].filter(Boolean).join('\n'), assetIds: [...refs],
+          size: parts[0] === parts[1] ? '1024x1024' : parts[0] > parts[1] ? '1536x1024' : '1024x1536' });
+        if (!result?.asset) return;
+        clear(generated);
+        generated.append(h('p', null, '생성 이미지를 자료함에 저장했습니다. 이미지 탭에서 배경·레이어로 선택할 수 있습니다.'), h('img', { src: '/api/assets/' + encodeURIComponent(result.asset.id), alt: 'AI 생성 결과', style: 'max-width:100%;max-height:420px;object-fit:contain;' }));
+        ctx.notify('이미지를 생성해 자료함에 보관했습니다.', 'success');
+      } catch (err) { ctx.notify(err.message || '이미지 생성에 실패했습니다.', 'error'); }
+      finally { btn.disabled = false; btn.removeAttribute('aria-busy'); }
+    } }, icon('plug', 'icon-sm'), h('span', null, label), h('span', { class: 'badge' }, ctx.ai?.ready('openai') ? 'API' : '키 설정'));
+    return btn;
+  }
+  const refBox = h('div', { class: 'pk-charbox', role: 'group', 'aria-label': 'AI 참조 이미지 선택' });
+  for (const a of (ctx.getAssets?.() || []).filter((a) => ['image/png', 'image/jpeg', 'image/webp'].includes(a.mime))) {
+    const cb = h('input', { type: 'checkbox' });
+    cb.addEventListener('change', () => {
+      if (cb.checked && refs.size >= 4) { cb.checked = false; ctx.notify('참조 이미지는 최대 4장입니다.', 'error'); return; }
+      if (cb.checked) refs.add(a.id); else refs.delete(a.id);
+    });
+    refBox.append(h('label', { class: 'check' }, cb, h('span', null, a.name || '이미지')));
+  }
+  if (!refBox.childElementCount) refBox.append(h('p', { class: 'hint' }, '자료함에 이미지를 올리면 여기에 참조 이미지가 표시됩니다.'));
 
   // ---------- 결과 영역 ----------
   const posOut = h('pre', { class: 'pl-out', 'aria-live': 'polite' });
@@ -164,7 +205,7 @@ export function renderPromptLab(root, ctx) {
       applyBtn,
     ),
     h('p', { class: 'pl-notice' }, icon('info', 'icon-sm'),
-      h('span', null, '이 앱은 아직 AI 모델에 직접 연결되지 않았습니다. 만든 프롬프트를 복사해 사용 중인 이미지 생성 서비스에 붙여 넣어 쓰세요. 자유 입력 문장은 번역하지 않고 그대로 넣습니다.')),
+      h('span', null, 'API 키 설정 후 이 프롬프트로 이미지를 생성할 수 있습니다. 생성 전 외부 전송·비용을 확인합니다. 수동 복사도 가능하며, 자유 입력은 그대로 사용합니다.')),
     h('div', { class: 'field' }, h('label', { htmlFor: 'pl-subject' }, '장면 묘사'), subject),
     h('div', { class: 'field' }, h('span', { class: 'label-like' }, '등장인물 (외모 설명을 함께 넣습니다)'), charBox),
     buildChipPanel(pl.picks, changed, { idPrefix: 'pl' }),
@@ -180,7 +221,7 @@ export function renderPromptLab(root, ctx) {
         h('button', { type: 'button', class: 'btn btn-sm', onclick: () => { pl.seed = randomSeed(); seedInput.value = String(pl.seed); changed(); } }, '랜덤 시드 만들기'),
         h('button', { type: 'button', class: 'btn btn-sm btn-quiet', onclick: () => { pl.seed = null; seedInput.value = ''; changed(); } }, '지우기'),
       ),
-      h('p', { class: 'hint' }, '같은 시드를 쓰면 같은 서비스에서 비슷한 구도를 다시 얻기 쉽습니다. 시드를 지원하지 않는 서비스도 있습니다.'),
+      h('p', { class: 'hint' }, '시드는 외부 서비스 복사용입니다. 이 앱의 OpenAI 이미지 호출에는 시드를 보내지 않으므로 재현성을 보장하지 않습니다. 요청 비율은 정사각·가로·세로 중 가까운 생성 크기로 적용합니다.'),
     ),
   );
 
@@ -200,33 +241,33 @@ export function renderPromptLab(root, ctx) {
     outBox('Positive 프롬프트', posOut, () => copy(last.positive, 'Positive 프롬프트')),
     outBox('Negative 프롬프트', negOut, () => copy(last.negative, 'Negative 프롬프트')),
     outBox('설정 요약', sumOut, () => copy(sumOut.textContent, '설정 요약')),
+    h('div', { class: 'field' }, h('span', { class: 'label-like' }, '참조 이미지 (선택, 최대 4장)'), refBox),
+    generated,
     h('div', { class: 'ai-row' },
-      h('button', { type: 'button', class: 'btn btn-ai', 'aria-disabled': 'true', onclick: () => ctx.aiBlocked('이미지 생성 (텍스트→이미지)') },
-        icon('plug'), h('span', null, '이 프롬프트로 생성'), h('span', { class: 'badge badge-off' }, 'AI 미연결')),
+      generateButton('이 프롬프트로 생성'),
     ),
   );
 
   // ---------- AI 도구 연결 현황 ----------
   const toolGrid = h('ul', { class: 'pl-tools', 'aria-label': 'AI 도구 목록' });
-  for (const t of AI_TOOLS) {
+  for (const [index, t] of AI_TOOLS.entries()) {
     toolGrid.append(h('li', { class: 'pl-tool' },
       h('div', { class: 'pl-tool-head' },
         h('h3', { class: 'panel-subtitle' }, icon('plug', 'icon-sm'), t.name),
-        h('span', { class: 'badge badge-off' }, 'AI 미연결'),
+        h('span', { class: 'badge' }, index < 6 ? (ctx.ai?.ready('openai') ? 'API' : '키 필요') : '미구현'),
       ),
       h('p', { class: 'small-text' }, t.desc),
       h('p', { class: 'small-text muted' }, `지금 가능한 것: ${t.local}`),
-      h('button', { type: 'button', class: 'btn btn-ai btn-sm', 'aria-disabled': 'true', onclick: () => ctx.aiBlocked(t.name) },
-        icon('plug', 'icon-sm'), h('span', null, '연결 안내 보기')),
+      index < 6 ? generateButton('이 도구로 생성', index, true) : h('p', { class: 'hint' }, '영상·음성 API는 아직 구현하지 않았습니다. 유료 호출이 일어나지 않습니다.'),
     ));
   }
   const status = h('section', { class: 'panel pl-status', 'aria-labelledby': 'pl-ai-heading' },
     h('div', { class: 'panel-head' },
       h('h2', { id: 'pl-ai-heading', class: 'panel-title' }, icon('server'), 'AI 도구 연결 현황'),
-      h('span', { class: 'counter' }, `연결됨 0 / ${AI_TOOLS.length}`),
+      h('span', { class: 'counter' }, `이미지 도구 ${ctx.ai?.ready('openai') ? 6 : 0} / ${AI_TOOLS.length}`),
     ),
     h('p', { class: 'hint' }, icon('info', 'icon-sm'),
-      '아래 기능은 아직 연결되지 않았고, 버튼을 눌러도 요청·결제·생성이 일어나지 않습니다. 연결하려면 AI 서비스 선택, API 키, 사용 비용 승인이 먼저 필요합니다.'),
+      '이미지 도구는 위 작업대의 프롬프트와 선택한 참조 이미지를 함께 사용합니다. 키가 있어도 모델 권한·결제 상태에 따라 실패할 수 있습니다. 영상·음성은 미구현입니다.'),
     toolGrid,
   );
 

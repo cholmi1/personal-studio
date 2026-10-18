@@ -1,0 +1,31 @@
+# Paid 0.5 CPU / 512MB web service + 1GB persistent disk. No automatic commit deploys.
+# Creating this Blueprint can start a paid first deploy: review the dashboard first.
+services:
+  - type: web
+    name: personal-studio
+    runtime: docker
+    plan: 0.5c-512mb
+    numInstances: 1
+    autoDeployTrigger: 'off'
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    disk:
+      name: studio-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: '10000'
+      - key: DATA_DIR
+        value: /data
+      - key: STUDIO_ALLOW_REMOTE
+        value: '1'
+      - key: STUDIO_SETUP_TOKEN
+        sync: false
+      - key: STUDIO_SECRET
+        sync: false

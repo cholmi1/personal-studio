@@ -14,3 +14,8 @@ backups/
 uploads/
 .DS_Store
 Thumbs.db
+
+!.env.example
+ai-config.enc
+ai-secret
+ai-usage.json

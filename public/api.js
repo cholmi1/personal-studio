@@ -1,4 +1,4 @@
-// 같은 출처 API 호출 래퍼. 외부 네트워크 호출은 하지 않는다.
+// 브라우저는 같은 출처 서버 API만 호출한다. AI 제공자 요청은 서버에서 수행한다.
 
 export class ApiError extends Error {
   constructor(message, status = 0, code = '') {
@@ -54,8 +54,13 @@ export async function api(path, { method = 'GET', body, raw = false } = {}) {
 }
 
 export const studioApi = {
+  aiConfig: () => api('/api/ai/config'),
+  aiSaveConfig: (body) => api('/api/ai/config', { method: 'PUT', body }),
+  aiTest: (provider) => api('/api/ai/test', { method: 'POST', body: { provider } }),
+  aiGemini: (body) => api('/api/ai/gemini', { method: 'POST', body }),
+  aiImage: (body) => api('/api/ai/image', { method: 'POST', body }),
   status: () => api('/api/status'),
-  setup: (name, email, password) => api('/api/setup', { method: 'POST', body: { name, email, password } }),
+  setup: (name, email, password, setupToken) => api('/api/setup', { method: 'POST', body: { name, email, password, ...(setupToken !== undefined ? { setupToken } : {}) } }),
   login: (email, password) => api('/api/login', { method: 'POST', body: { email, password } }),
   logout: () => api('/api/logout', { method: 'POST', body: {} }),
   listProjects: () => api('/api/projects'),

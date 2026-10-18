@@ -337,6 +337,24 @@ export function renderEditor(root, ctx) {
   const imageWarn = h('p', { class: 'warn-line', hidden: true, role: 'status' });
   const downloadBtn = h('button', { type: 'button', class: 'btn btn-primary', onclick: downloadPng }, icon('download'), h('span', null, 'PNG 내려받기'));
 
+  const aiPrompt = h('textarea', { id: 'canvas-ai-prompt', class: 'input', rows: 2, maxLength: 4000, placeholder: '생성할 배경 이미지를 설명하세요. 문구는 생성 후 텍스트 레이어로 넣는 것을 권장합니다.' });
+  const aiRef = h('input', { type: 'checkbox', id: 'canvas-ai-ref' });
+  const aiBtn = h('button', { type: 'button', class: 'btn btn-ai', onclick: async () => {
+    if (!ctx.ai?.ready('openai')) { ctx.ai?.open(); return; }
+    if (aiBtn.disabled) return;
+    const prompt = aiPrompt.value.trim();
+    if (!prompt) { ctx.notify('생성할 이미지 설명을 입력해 주세요.', 'error'); aiPrompt.focus(); return; }
+    if (editor.baseAssetId && !await ctx.confirm({ title: '배경 이미지 바꾸기', message: '생성한 이미지로 캔버스 배경을 바꿀까요? 기존 이미지는 자료함에 남고 텍스트·레이어도 유지됩니다.', okLabel: '계속' })) return;
+    aiBtn.disabled = true; aiBtn.setAttribute('aria-busy', 'true');
+    try {
+      const result = await ctx.ai.image({ prompt, assetIds: aiRef.checked && editor.baseAssetId ? [editor.baseAssetId] : [], size: editor.width === editor.height ? '1024x1024' : editor.width > editor.height ? '1536x1024' : '1024x1536' });
+      if (!result?.asset) return;
+      editor.baseAssetId = result.asset.id; ctx.markDirty(); redraw(); renderImagePanel();
+      ctx.notify('생성 이미지를 배경으로 넣었습니다. 저장해 주세요.', 'success');
+    } catch (err) { ctx.notify(err.message || '이미지 생성에 실패했습니다.', 'error'); }
+    finally { aiBtn.disabled = false; aiBtn.removeAttribute('aria-busy'); }
+  } }, icon('plug'), h('span', null, 'AI 이미지 생성'), h('span', { class: 'badge' }, ctx.ai?.ready('openai') ? 'API' : '키 설정'));
+
   const stagePanel = h('section', { class: 'panel stage-panel', 'aria-labelledby': 'stage-heading' },
     h('div', { class: 'panel-head' },
       h('h2', { id: 'stage-heading', class: 'panel-title' }, icon('image'), '캔버스'),
@@ -345,10 +363,10 @@ export function renderEditor(root, ctx) {
     h('div', { class: 'stage' }, canvas),
     imageWarn,
     h('p', { class: 'hint' }, icon('info', 'icon-sm'), '문구·이미지를 끌어서 옮기고, 선택한 이미지의 오른쪽 아래 모서리를 끌어 크기를 바꿉니다(Shift: 비율 무시). 캔버스를 선택(Tab)한 뒤 방향키로 1px, Shift+방향키로 10px씩 움직입니다.'),
+    h('div', { class: 'field' }, h('label', { htmlFor: 'canvas-ai-prompt' }, 'AI 이미지 설명'), aiPrompt, h('label', { class: 'check', htmlFor: 'canvas-ai-ref' }, aiRef, h('span', null, '현재 배경 이미지를 참조로 전송'))),
     h('div', { class: 'stage-actions' },
       downloadBtn,
-      h('button', { type: 'button', class: 'btn btn-ai', 'aria-disabled': 'true', onclick: () => ctx.aiBlocked('AI 이미지 생성') },
-        icon('plug'), h('span', null, 'AI 이미지 생성'), h('span', { class: 'badge badge-off' }, 'AI 미연결')),
+      aiBtn,
     ),
   );
 

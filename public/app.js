@@ -7,6 +7,7 @@ import { renderEditor, makeLayer, forgetImage, RATIOS, MAX_LAYERS, MAX_IMAGE_LAY
 import { renderPromptLab } from './promptlab.js';
 import { openSketchPad } from './sketch.js';
 import { renderDetailPage } from './detail-page.js';
+import { createAiController } from './ai-settings.js';
 
 const TYPE_LABELS = { travel: '여행', story: '이야기', image: '이미지', product: '상세페이지', other: '기타' };
 const TYPES = Object.keys(TYPE_LABELS);
@@ -67,6 +68,24 @@ const S = {
 const appRoot = document.getElementById('app');
 const toastRoot = document.getElementById('toasts');
 const UI = {}; // 작업실 고정 요소 참조
+const aiController = createAiController({
+  getProjectId: () => S.cur?.project.id,
+  getAssets: () => S.assets,
+  addAsset: (asset) => {
+    if (!S.assets.some(a => a.id === asset.id)) S.assets.push(asset);
+    renderTabs();
+  },
+  notify, confirm: confirmDialog, openDialog,
+  onChange: (config) => {
+    if (S.status) S.status.ai = { configured: !!(config?.geminiConfigured || config?.openaiConfigured) };
+    if (UI.aiChip) {
+      const ready = !!(config?.geminiConfigured || config?.openaiConfigured);
+      UI.aiChip.classList.toggle('is-ready', ready);
+      UI.aiChip.querySelector('.chip-text').textContent = ready ? 'AI 키 설정됨' : 'AI 연결 설정';
+      UI.aiChip.title = 'Gemini·OpenAI API 키, 모델, 사용 한도 설정';
+    }
+  },
+});
 
 // ======================================================================
 // 공통: 알림, 대화상자
@@ -154,8 +173,8 @@ function aiBlocked(feature) {
       h('p', null, `"${feature}" 기능은 아직 연결되지 않았습니다.`),
       h('p', null, '이 버튼은 요청을 보내지 않았고, 생성 결과·유료 호출·결제도 발생하지 않았습니다.'),
       h('p', { class: 'muted' }, configured
-        ? '서버에서 AI 설정이 감지되었지만, 이 화면에는 아직 생성 기능이 구현되어 있지 않습니다.'
-        : 'AI 제공자·키·모델을 확인하고 별도로 승인한 뒤에 연결할 예정입니다. 그동안 수동 편집·로컬 분할·PNG 출력은 그대로 쓸 수 있습니다.'),
+        ? '이 기능은 현재 AI 연결 대상에 포함되지 않았습니다. 지원되는 문구·이미지 기능을 이용해 주세요.'
+        : '상단 AI 연결 설정에서 API 키를 등록해 주세요. 수동 편집·로컬 분할·PNG 출력은 키 없이도 그대로 쓸 수 있습니다.'),
     ),
     actions: [{ value: 'ok', label: '알겠습니다', variant: 'primary' }],
     hideCancel: true,
@@ -411,7 +430,7 @@ function renderFatal(err) {
       h('div', { class: 'auth-brand' }, brandMark(), h('span', null, '나의 창작실')),
       h('h1', { class: 'auth-title' }, '서버에 연결하지 못했습니다'),
       h('p', { class: 'form-error', role: 'alert' }, err && err.message ? err.message : '알 수 없는 오류'),
-      h('p', { class: 'muted' }, '이 앱은 이 컴퓨터에서 실행하는 로컬 서버와 함께 동작합니다. 서버를 다시 켠 뒤 시도해 주세요.'),
+      h('p', { class: 'muted' }, '서버에 연결할 수 없습니다. 로컬 사용 중이면 시작.cmd를 실행하고, 배포 서버라면 운영 상태와 주소를 확인해 주세요.'),
       h('button', { type: 'button', class: 'btn btn-primary', onclick: boot }, '다시 시도'),
     ),
   ));
@@ -439,6 +458,7 @@ function renderAuth(mode) {
       field({ id: 'setup-email', label: '이메일 (로그인 아이디)', type: 'email', autocomplete: 'username', maxLength: 200 }),
       field({ id: 'setup-pw', label: '비밀번호', type: 'password', autocomplete: 'new-password', maxLength: 200, minLength: 12, hint: '12자 이상. 비밀번호 찾기 기능이 아직 없으니 직접 안전하게 보관해 주세요.' }),
       field({ id: 'setup-pw2', label: '비밀번호 확인', type: 'password', autocomplete: 'new-password', maxLength: 200 }),
+      ...(S.status?.setupTokenRequired ? [field({ id: 'setup-token', label: '최초 설정 토큰', type: 'password', autocomplete: 'off', maxLength: 1024, hint: '배포 시 지정한 STUDIO_SETUP_TOKEN 값을 입력하세요. 계정 생성 후에는 사용하지 않습니다.' })] : []),
     ]
     : [
       field({ id: 'login-email', label: '이메일', type: 'email', autocomplete: 'username', maxLength: 200 }),
@@ -476,7 +496,9 @@ function renderAuth(mode) {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('올바른 이메일 주소를 입력해 주세요.', 'setup-email');
       if (pw.length < 12) return fail('비밀번호는 12자 이상이어야 합니다.', 'setup-pw');
       if (pw !== val('setup-pw2')) return fail('비밀번호 확인이 일치하지 않습니다.', 'setup-pw2');
-      call = () => studioApi.setup(name, email, pw);
+      const setupToken = S.status?.setupTokenRequired ? val('setup-token').trim() : undefined;
+      if (S.status?.setupTokenRequired && !setupToken) return fail('최초 설정 토큰을 입력해 주세요.', 'setup-token');
+      call = () => studioApi.setup(name, email, pw, setupToken);
     } else {
       const email = val('login-email').trim();
       const pw = val('login-pw');
@@ -511,7 +533,7 @@ function renderAuth(mode) {
         ? '이 서버에는 소유자 계정 하나만 만들 수 있고, 이후 새 가입은 막힙니다. 미리 정해진 계정이나 비밀번호는 없습니다.'
         : '나만 쓰는 비공개 작업실입니다. 소유자 계정으로 로그인하세요.'),
       form,
-      h('p', { class: 'auth-foot' }, icon('server', 'icon-sm'), '로컬 서버 시제품 · 외부 배포와 여러 기기 동기화는 아직 켜져 있지 않습니다.'),
+      h('p', { class: 'auth-foot' }, icon('server', 'icon-sm'), 'v0.4 · 개인용 작업실 · 처음 생성한 소유자 계정으로만 접속할 수 있습니다.'),
     ),
   ));
   document.getElementById(isSetup ? 'setup-name' : 'login-email')?.focus();
@@ -546,6 +568,7 @@ async function reauth() {
   if (ok === 'ok') {
     notify('다시 로그인했습니다. 작업 내용은 그대로입니다.', 'success');
     renderTopbarUser();
+    aiController.refresh().catch(err => handleError(err, 'AI 설정을 확인하지 못했습니다: '));
   } else {
     notify('로그인하지 않으면 저장할 수 없습니다. 변경 내용은 이 창에만 남아 있습니다.', 'error');
   }
@@ -562,12 +585,13 @@ function enterWorkspace() {
   UI.menuBtn = h('button', { type: 'button', class: 'icon-btn menu-btn', 'aria-label': '작업 목록 열기', 'aria-expanded': 'false', 'aria-controls': 'library', onclick: toggleDrawer }, icon('menu'));
   UI.saveStatus = h('button', { type: 'button', class: 'save-status', hidden: true, onclick: onStatusClick, onmousedown: keepFocus, 'aria-live': 'polite' });
   UI.userBtn = h('button', { type: 'button', class: 'user-chip', onclick: openSettings, 'aria-label': '설정과 계정' });
+  UI.aiChip = h('button', { type: 'button', class: 'chip chip-off ai-connect-chip', onclick: () => aiController.open(), 'aria-label': 'AI 연결 설정' }, icon('plug', 'icon-sm'), h('span', { class: 'chip-text' }, 'AI 연결 설정'));
   const topbar = h('header', { class: 'topbar' },
     UI.menuBtn,
     h('div', { class: 'brand' }, brandMark(), h('span', { class: 'brand-name' }, '나의 창작실')),
     h('div', { class: 'topbar-spacer' }),
     UI.saveStatus,
-    h('span', { class: 'chip chip-off', title: 'AI 제공자가 연결되지 않았습니다' }, icon('plug', 'icon-sm'), h('span', { class: 'chip-text' }, 'AI 미연결')),
+    UI.aiChip,
     h('button', { type: 'button', class: 'icon-btn topbar-settings', 'aria-label': '설정', onclick: openSettings }, icon('settings')),
     UI.userBtn,
   );
@@ -598,7 +622,7 @@ function enterWorkspace() {
     h('div', { class: 'lib-foot' },
       importInput,
       h('button', { type: 'button', class: 'btn btn-quiet btn-sm btn-block', onclick: () => importInput.click() }, icon('importIcon', 'icon-sm'), h('span', null, '백업 파일 가져오기')),
-      h('p', { class: 'lib-note' }, icon('server', 'icon-sm'), h('span', null, '이 컴퓨터의 로컬 서버에 저장 · 다른 기기 동기화는 아직 없음')),
+      h('p', { class: 'lib-note' }, icon('server', 'icon-sm'), h('span', null, '접속한 서버에 저장 · 다른 PC는 같은 서버 주소로 접속')),
     ),
   );
   UI.scrim = h('div', { class: 'scrim', onclick: closeDrawer });
@@ -609,6 +633,8 @@ function enterWorkspace() {
     h('div', { class: 'shell' }, topbar, h('div', { class: 'body' }, UI.library, UI.scrim, UI.main)),
   );
   renderTopbarUser();
+  aiController.reset();
+  aiController.refresh().catch(err => handleError(err, 'AI 설정을 확인하지 못했습니다: '));
   renderFilters();
   renderMain();
   loadProjects().then(() => {
@@ -1274,7 +1300,7 @@ function renderAssets(root) {
     h('label', { htmlFor: 'asset-upload', class: 'btn btn-primary file-btn', tabIndex: 0, role: 'button',
       onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } } },
     icon('upload', 'icon-sm'), h('span', null, '파일 고르기')),
-    h('p', { class: 'hint' }, 'PNG · JPEG · WebP, 파일당 최대 10MB. 이 컴퓨터의 로컬 서버에만 보관됩니다.'),
+    h('p', { class: 'hint' }, 'PNG · JPEG · WebP, 파일당 최대 10MB. 접속한 서버에 보관됩니다. AI 참조로 선택하면 동의 후 외부 전송됩니다.'),
     h('p', { id: 'upload-progress', class: 'upload-progress', role: 'status', hidden: true }),
   );
   zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('is-over'); });
@@ -1383,7 +1409,7 @@ function renderInfo(root) {
           h('dt', null, '만든 날'), h('dd', null, formatDate(cur.project.createdAt) || '-'),
           h('dt', null, '서버 저장'), h('dd', null, formatDate(cur.project.updatedAt) || '-'),
           h('dt', null, '저장 버전'), h('dd', null, String(cur.project.version ?? '-')),
-          h('dt', null, '보관 위치'), h('dd', null, '이 컴퓨터의 로컬 서버'),
+          h('dt', null, '보관 위치'), h('dd', null, '현재 접속한 서버'),
         ),
       ),
       h('section', { class: 'panel', 'aria-labelledby': 'backup-heading' },
@@ -1494,9 +1520,10 @@ function renderTab() {
   if (!panel || !S.cur) return;
   panel.setAttribute('aria-labelledby', `tab-${S.tab}`);
   const getState = () => S.cur.draft.state;
+  const ai = aiController;
   if (S.tab === 'story') {
     renderStory(panel, {
-      getState, markDirty, notify, choose, confirm: confirmDialog, aiBlocked,
+      getState, markDirty, notify, choose, confirm: confirmDialog, aiBlocked, ai,
       getAssets: () => S.assets, uploadFiles, projectTitle: () => S.cur.draft.title, switchTab,
       sendToCanvas: (text) => {
         const ed = S.cur.draft.state.editor;
@@ -1511,7 +1538,7 @@ function renderTab() {
     });
   } else if (S.tab === 'image') {
     renderEditor(panel, {
-      getState, markDirty, notify, aiBlocked,
+      getState, markDirty, notify, aiBlocked, ai,
       getAssets: () => S.assets,
       uploadFiles,
       uploadBlob,
@@ -1520,11 +1547,11 @@ function renderTab() {
     });
   } else if (S.tab === 'detail') {
     renderDetailPage(panel, {
-      getState, markDirty, notify, aiBlocked, confirm: confirmDialog,
+      getState, markDirty, notify, aiBlocked, ai, confirm: confirmDialog,
       getAssets: () => S.assets, uploadFiles, projectTitle: () => S.cur.draft.title, switchTab,
     });
   } else if (S.tab === 'prompt') {
-    renderPromptLab(panel, { getState, markDirty, notify, aiBlocked, confirm: confirmDialog, switchTab });
+    renderPromptLab(panel, { getState, markDirty, notify, aiBlocked, ai, getAssets: () => S.assets, confirm: confirmDialog, switchTab });
   } else if (S.tab === 'assets') {
     renderAssets(panel);
   } else {
@@ -1586,9 +1613,9 @@ function renderHome() {
       h('section', { class: 'panel', 'aria-labelledby': 'now-heading' },
         h('h2', { id: 'now-heading', class: 'panel-title' }, icon('server'), '지금 이 작업실은'),
         h('ul', { class: 'fact-list' },
-          h('li', null, h('span', { class: 'fact-k' }, '저장'), h('span', null, '이 컴퓨터에서 실행 중인 로컬 서버에 보관')),
-          h('li', null, h('span', { class: 'fact-k' }, '다른 기기'), h('span', null, '아직 연결 안 됨 · 백업 파일로 옮기기 가능')),
-          h('li', null, h('span', { class: 'fact-k' }, 'AI'), h('span', null, ai ? '서버 설정 감지 · 화면 기능은 아직 없음' : 'AI 미연결 · 유료 호출 없음')),
+          h('li', null, h('span', { class: 'fact-k' }, '저장'), h('span', null, '현재 접속한 서버의 SQLite + 이미지 파일')),
+          h('li', null, h('span', { class: 'fact-k' }, '다른 기기'), h('span', null, S.status?.deployment === 'local' ? '배포 후 같은 주소로 접속 · 지금은 백업 이동 가능' : '같은 HTTPS 주소와 소유자 계정으로 접속')),
+          h('li', null, h('span', { class: 'fact-k' }, 'AI'), h('span', null, ai ? 'API 키 설정됨 · 생성 전 전송·비용 확인' : '상단 AI 연결 설정에서 키 등록')),
           h('li', null, h('span', { class: 'fact-k' }, '직접 가능'), h('span', null, '대본·스토리보드, 프롬프트 작업대, 이미지 합성·스케치, 상세페이지 PNG·ZIP')),
         ),
         h('button', { type: 'button', class: 'btn btn-quiet btn-sm', onclick: openSettings }, icon('settings', 'icon-sm'), h('span', null, '자세히 보기')),
@@ -1619,19 +1646,19 @@ async function openSettings() {
     ),
     h('section', null,
       h('h3', null, icon('server', 'icon-sm'), '저장과 실행 환경'),
-      row('저장 위치', st.storage === 'server' ? '로컬 서버 (SQLite + 이미지 파일)' : String(st.storage || '알 수 없음')),
-      row('배포 상태', st.deployment === 'local' ? '로컬 전용 시제품' : String(st.deployment || '알 수 없음'), 'warn'),
-      row('여러 기기 동기화', '아직 사용할 수 없음', 'warn'),
-      h('p', { class: 'muted small-text' }, '지금은 이 컴퓨터에서 실행한 서버 주소로 접속한 브라우저에서만 작업이 보입니다. 집·회사·휴대폰에서 같은 작업을 이어 쓰려면 HTTPS 서버 배포가 필요하며, 이는 별도 승인 후 진행할 다음 단계입니다. 그전에는 "백업 내려받기"와 "백업 파일 가져오기"로 옮길 수 있습니다.'),
+      row('저장 위치', st.storage === 'server' ? '접속한 서버 (SQLite + 이미지 파일)' : String(st.storage || '알 수 없음')),
+      row('배포 상태', st.deployment === 'local' ? '로컬 실행 · 배포 준비됨' : String(st.deployment || '알 수 없음'), 'warn'),
+      row('여러 기기 사용', st.deployment === 'local' ? 'HTTPS 배포 후 같은 주소로 접속' : '같은 서버·계정으로 사용 · 동시 수정은 충돌 확인', 'warn'),
+      h('p', { class: 'muted small-text' }, '작업은 현재 접속한 서버에 저장됩니다. HTTPS로 배포한 뒤 집·회사·휴대폰에서 같은 주소와 계정으로 접속하면 같은 작업을 사용할 수 있습니다. 자동 오프라인 동기화는 아니며 동시 수정 시 충돌을 확인해야 합니다. 백업 내려받기·가져오기도 사용할 수 있습니다.'),
     ),
     h('section', null,
       h('h3', null, icon('plug', 'icon-sm'), 'AI 기능'),
-      row('상태', ai ? '서버 설정 감지 · 화면 기능 미구현' : 'AI 미연결', 'off'),
-      h('p', { class: 'muted small-text' }, 'AI 대본 다듬기·이미지 생성 버튼은 보이지만 요청을 보내지 않습니다. 가짜 결과를 만들지 않으며 유료 호출이나 자동 결제도 일어나지 않습니다. 제공자·키·모델을 확인하고 승인한 뒤에 연결합니다.'),
+      row('상태', ai ? 'API 키 설정됨 · 실제 호출 권한은 연결 확인 필요' : 'API 키 미설정', ai ? '' : 'off'),
+      h('p', { class: 'muted small-text' }, 'Gemini로 문구·기획을 만들고 OpenAI로 이미지를 생성합니다. API 키·모델·하루 횟수 한도는 AI 연결 설정에서 관리합니다. 실제 요청마다 문구·사진의 외부 전송과 API 비용을 확인하며, 자동 생성은 하지 않습니다.'),
     ),
     h('section', null,
       h('h3', null, icon('info', 'icon-sm'), '개인정보와 단축키'),
-      h('p', { class: 'muted small-text' }, '이 화면은 외부 글꼴·분석 도구·제3자 서버를 사용하지 않고, 같은 서버의 API에만 요청합니다.'),
+      h('p', { class: 'muted small-text' }, '브라우저는 같은 서버의 API에만 요청합니다. AI 사용에 동의하면 서버가 Google 또는 OpenAI에 입력 문구와 선택한 사진을 전송합니다. 외부 글꼴·분석 도구는 사용하지 않습니다.'),
       h('ul', { class: 'kbd-list' },
         h('li', null, h('kbd', null, 'Ctrl'), '+', h('kbd', null, 'S'), ' 저장 (Mac은 ⌘+S)'),
         h('li', null, h('kbd', null, '/'), ' 작업 검색'),
@@ -1644,9 +1671,10 @@ async function openSettings() {
     title: '설정 · 상태',
     content,
     className: 'dialog-wide',
-    actions: [{ value: 'close', label: '닫기', variant: 'primary' }, { value: 'logout', label: '로그아웃', variant: 'quiet' }],
+    actions: [{ value: 'close', label: '닫기', variant: 'primary' }, { value: 'ai', label: 'AI 연결 설정' }, { value: 'logout', label: '로그아웃', variant: 'quiet' }],
     hideCancel: true,
   });
+  if (v === 'ai') aiController.open();
   if (v === 'logout') logout();
 }
 
@@ -1658,6 +1686,7 @@ async function logout() {
     if (err.status !== 401) { handleError(err, '로그아웃하지 못했습니다: '); return; }
   }
   S.user = null;
+  aiController.reset();
   S.cur = null;
   S.assets = [];
   S.projects = [];

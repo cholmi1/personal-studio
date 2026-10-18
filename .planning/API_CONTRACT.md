@@ -48,3 +48,14 @@ public/index.html, public/styles.css, public/app.js (+ optional modules under pu
 - state.detailPage {productAssetIds (uuid, unique, <=8), modelAssetId, extraInfo<=4000, reviewSummary<=8000, settings{template basic|objection|proof|scenario|story|mobile, count int 3..12, lang 한국어|영어|일본어, ratio portrait|square|landscape, style 8 Korean values, mode edit|baked, model none|some|hero, tone<=1000}, plan null|{productName<=120, summary<=500, palette<=3 hex, sections<=16 [{id,type(13 types+custom),label<=40,headline<=200,subcopy<=1000,bullets<=8x200,visual<=2000,useModel,assetId,bg hex,layers<=12 [{id,role label|headline|subcopy|bullets|text,text<=2000,visible,x 0..1,y -0.1..1.2,size 10..240,weight 400..900 step100,font sans|serif|display|round,color,align,lineHeight 0.8..3,maxW 0.1..1,shadow,bg,bgColor,bgOpacity 0..1}]}]}}.
 - Import remaps product/model/section asset references; missing references are rejected.
 - Frontend: detail-kit.js (pure helpers incl. CSV parsing, plan JSON parsing, STORE ZIP writer), detail-page.js, detail-page.css. No AI calls.
+
+
+## v0.4 AI 경유 연결 (위 v0.1 미연결 계약 대체)
+인증 필수, 변경요청은 동일Origin필수. 키/참조사진은브라우저가제공자에직접전송하지않음.
+- GET /api/ai/config: 키존재여부/설정/일일시도수, 키원문없음
+- PUT /api/ai/config: geminiKey/openaiKey(빈칸유지), removeGemini/removeOpenai, geminiModel/imageModel/quality/dailyImageLimit/dailyTextLimit
+- POST /api/ai/test {provider}: 모델목록만조회. 생성가능/무료보장아님
+- POST /api/ai/gemini {projectId,prompt,json?,assetIds?}: {text,json?,usage}. 최대참조8장/합8MiB
+- POST /api/ai/image {projectId,prompt,assetIds?,size?,quality?}: {asset,usage}. 최대참조4장/합20MiB. 생성/편집결과PNG검증후자료저장
+- size:1024x1024/1536x1024/1024x1536. 키없음501, 한도429, 동시요청409, 공급자502. 자동재시도없음
+- status.setupTokenRequired: 원격최초계정설정시 setupToken필드필수. 공개HTTPS주소기반Secure쿠키

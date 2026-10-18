@@ -157,6 +157,7 @@ test('fresh server: health, status, auth gates, no seeded owner', async () => {
     ai: { configured: false },
     storage: 'server',
     deployment: 'local',
+    setupTokenRequired: false,
   });
 
   for (const p of ['/api/projects', '/api/projects/00000000-0000-4000-8000-000000000000', '/api/assets/00000000-0000-4000-8000-000000000000', '/api/ai/generate']) {
@@ -712,7 +713,7 @@ test('config guards: default static root, overlapping dirs, remote bind refusal,
   await remote.close();
   const remote2 = createStudioServer({ dataDir: mkTemp('data-'), publicDir: makePublicDir(), host: '0.0.0.0', port: 0, allowRemote: true, logger: QUIET });
   servers.push(remote2);
-  await assert.rejects(remote2.listen(), /소유자 계정이 아직 없습니다/);
+  await assert.rejects(remote2.listen(), /HTTPS STUDIO_PUBLIC_ORIGIN/);
   await remote2.close();
 
   const { client } = await startServer({ secureCookies: true });

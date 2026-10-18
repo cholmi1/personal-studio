@@ -2,7 +2,8 @@
 import http from 'node:http';
 import fs, { promises as fsp, createReadStream } from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
+import { createAi } from './ai.mjs';
 import { fileURLToPath } from 'node:url';
 
 import { openDatabase, transaction } from './db.mjs';
@@ -121,6 +122,9 @@ export function createStudioServer(options = {}) {
   const publicOrigin = options.publicOrigin ? new URL(options.publicOrigin).origin : null;
   const secureCookies = options.secureCookies ?? (publicOrigin ? publicOrigin.startsWith('https:') : false);
   const allowRemote = options.allowRemote === true;
+  const setupToken = options.setupToken || '';
+  if (setupToken && setupToken.length < 24) throw new Error('STUDIO_SETUP_TOKEN은 24자 이상이어야 합니다.');
+  const tokenRequired = Boolean(publicOrigin || !isLoopbackHost(host) || setupToken);
   const sessionTtlMs = options.sessionTtlMs ?? SESSION_TTL_MS;
   const cookieName = secureCookies ? '__Host-studio_session' : 'studio_session';
   // Test-only failure injection (e.g. to verify import rollback). Never set in production.
@@ -145,6 +149,7 @@ export function createStudioServer(options = {}) {
     }
   }
 
+  const ai = createAi({ dataDir: dataReal, env: options.aiEnv ?? {}, fetchImpl: options.aiFetch ?? globalThis.fetch });
   const db = openDatabase(path.join(dataReal, 'studio.sqlite'));
   db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
 
@@ -315,14 +320,25 @@ export function createStudioServer(options = {}) {
 
   // ---------- route handlers ----------
   async function handleSetup(req, res) {
-    // First-owner claim is only accepted from the local machine.
-    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    // Proxied loopback traffic is NOT proof of a local setup. Public setup always needs a secret.
+    if (!tokenRequired && !isLoopbackAddress(req.socket.remoteAddress)) {
       throw new HttpError(403, '최초 소유자 설정은 이 컴퓨터(로컬)에서만 할 수 있습니다.', 'SETUP_LOCAL_ONLY');
     }
     const body = await readJson(req, BODY_LIMITS.small);
     if (hasOwner()) throw new HttpError(409, '이미 소유자 계정이 설정되어 있습니다. 로그인해 주세요.', 'SETUP_ALREADY_DONE');
-    rejectUnknownBodyKeys(body, ['name', 'email', 'password']);
-    const { name, email, password } = validateSetup(body);
+    const clientKey = req.socket.remoteAddress || 'unknown';
+    if (throttle.check(clientKey) > 0) throw new HttpError(429, '최초 설정 시도가 너무 많습니다.', 'SETUP_THROTTLED');
+    if (tokenRequired) {
+      const supplied = typeof body.setupToken === 'string' ? body.setupToken : '';
+      const digest = s => createHash('sha256').update(s).digest();
+      if (!setupToken || !timingSafeEqual(digest(supplied), digest(setupToken))) {
+        throttle.fail(clientKey);
+        throw new HttpError(403, '배포 환경에 설정한 최초 설정 토큰을 입력해 주세요.', 'SETUP_TOKEN_REQUIRED');
+      }
+    }
+    rejectUnknownBodyKeys(body, ['name', 'email', 'password', 'setupToken']);
+    const { setupToken: ignoredToken, ...account } = body;
+    const { name, email, password } = validateSetup(account);
     const passwordHash = await hashPassword(password);
     let cookie;
     transaction(db, () => {
@@ -578,6 +594,50 @@ export function createStudioServer(options = {}) {
     sendJson(res, 201, { project: projectJson(q.getProject.get(projectId), true) });
   }
 
+  // Authenticated same-origin AI proxy. Provider URLs are fixed, never user-controlled.
+  async function handleAi(req, res, pathname) {
+    const method = req.method;
+    if (pathname === '/api/ai/config') {
+      if (method === 'GET') return sendJson(res, 200, ai.status());
+      if (method === 'PUT') return sendJson(res, 200, ai.update(await readJson(req, BODY_LIMITS.small)));
+      throw methodNotAllowed(['GET','PUT']);
+    }
+    if (!['/api/ai/test','/api/ai/gemini','/api/ai/image'].includes(pathname)) return sendJson(res, 501, AI_NOT_CONFIGURED);
+    if (method !== 'POST') throw methodNotAllowed(['POST']);
+    const body = await readJson(req, 256 * KiB);
+    if (pathname === '/api/ai/test') {
+      rejectUnknownBodyKeys(body,['provider']);
+      return sendJson(res,200,await ai.test(body.provider));
+    }
+    const isImage = pathname === '/api/ai/image';
+    rejectUnknownBodyKeys(body, isImage ? ['projectId','prompt','assetIds','size','quality'] : ['projectId','prompt','assetIds','json']);
+    if (body.json !== undefined && typeof body.json !== 'boolean') throw new HttpError(400,'json은 참/거짓이어야 합니다.','VALIDATION_ERROR');
+    loadProject(body.projectId);
+    const ids = body.assetIds ?? [];
+    if (!Array.isArray(ids) || ids.length > (isImage ? 4 : 8) || new Set(ids).size !== ids.length) throw new HttpError(400,'참조 이미지 수 또는 형식을 확인해 주세요.','VALIDATION_ERROR');
+    const refs = []; let total = 0;
+    for (const id of ids) {
+      const row = isUuid(id) ? q.getAsset.get(id) : null;
+      if (!row || row.project_id !== body.projectId) throw new HttpError(404,'이 작업의 참조 이미지를 찾을 수 없습니다.','NOT_FOUND');
+      total += row.size;
+      if (total > (isImage ? 20 : 8) * MiB) throw new HttpError(413,'참조 이미지 용량을 줄여 주세요.','PAYLOAD_TOO_LARGE');
+      refs.push({mime:row.mime,bytes:await fsp.readFile(assetPath(row.file))});
+    }
+    if (!isImage) return sendJson(res,200,await ai.gemini({...body,refs}));
+    if (q.assetCount.get(body.projectId).n >= LIMITS.assetsPerProjectMax) throw new HttpError(409,'프로젝트 자료함이 가득 찼습니다.','ASSET_LIMIT');
+    const result = await ai.image({...body,refs});
+    const img = validateImagePayload({name:'AI 생성 이미지.png',mime:result.mime,data:result.bytes.toString('base64')});
+    const id = randomUUID(); const file = await writeAssetFile(id,img.mime,img.bytes);
+    try {
+      transaction(db, () => {
+        loadProject(body.projectId);
+        if (q.assetCount.get(body.projectId).n >= LIMITS.assetsPerProjectMax) throw new HttpError(409,'자료함이 가득 찼습니다.','ASSET_LIMIT');
+        q.insertAsset.run(id,body.projectId,img.name,img.mime,img.bytes.length,file,nowIso());
+      });
+    } catch (e) { await removeFiles([file]); throw e; }
+    return sendJson(res,201,{asset:assetJson(q.getAsset.get(id)),usage:result.usage});
+  }
+
   // ---------- router ----------
   async function handleApi(req, res, url) {
     const { pathname } = url;
@@ -586,7 +646,7 @@ export function createStudioServer(options = {}) {
 
     if (pathname === '/api/ai' || pathname.startsWith('/api/ai/')) {
       requireUser(req);
-      sendJson(res, 501, AI_NOT_CONFIGURED);
+      await handleAi(req, res, pathname);
       return;
     }
 
@@ -602,9 +662,10 @@ export function createStudioServer(options = {}) {
         setupRequired: !hasOwner(),
         authenticated: Boolean(user),
         user: user ? publicUser(user) : null,
-        ai: { configured: false },
+        ai: { configured: ai.status().geminiConfigured || ai.status().openaiConfigured },
+        setupTokenRequired: tokenRequired && !hasOwner(),
         storage: 'server',
-        deployment: 'local',
+        deployment: publicOrigin ? 'remote' : 'local',
       });
       return;
     }
@@ -754,7 +815,10 @@ export function createStudioServer(options = {}) {
             ),
           );
         }
-        if (!hasOwner()) {
+        if (!publicOrigin || !publicOrigin.startsWith('https:') || !secureCookies) {
+          return Promise.reject(new Error('외부 운영에는 정확한 HTTPS STUDIO_PUBLIC_ORIGIN과 Secure 쿠키가 필요합니다.'));
+        }
+        if (!hasOwner() && !setupToken) {
           return Promise.reject(
             new Error('소유자 계정이 아직 없습니다. 먼저 127.0.0.1에서 실행해 최초 설정을 마친 뒤 외부 주소로 실행하세요.'),
           );
@@ -806,7 +870,9 @@ async function main() {
       publicDir: env.PUBLIC_DIR || undefined,
       host: env.HOST || DEFAULT_HOST,
       port: parsePort(env.PORT, DEFAULT_PORT),
-      publicOrigin: env.STUDIO_PUBLIC_ORIGIN || undefined,
+      publicOrigin: env.STUDIO_PUBLIC_ORIGIN || env.RENDER_EXTERNAL_URL || (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : undefined),
+      setupToken: env.STUDIO_SETUP_TOKEN || undefined,
+      aiEnv: env,
       allowedHosts: env.STUDIO_ALLOWED_HOSTS ? env.STUDIO_ALLOWED_HOSTS.split(',').map((s) => s.trim()) : undefined,
       secureCookies: env.STUDIO_SECURE_COOKIES === '1' ? true : undefined,
       allowRemote: env.STUDIO_ALLOW_REMOTE === '1',
