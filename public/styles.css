@@ -234,7 +234,7 @@ select.input { padding-right: 30px; cursor: pointer; }
 .pi-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pi-meta { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .type-dot { width: 9px; height: 9px; border-radius: 3px; flex: none; }
-.t-travel { --tc: #3d6b7a; } .t-story { --tc: #8a5a3c; } .t-image { --tc: #47614b; } .t-other { --tc: #7a7166; }
+.t-travel { --tc: #3d6b7a; } .t-story { --tc: #8a5a3c; } .t-image { --tc: #47614b; } .t-product { --tc: #9a6b2f; } .t-other { --tc: #7a7166; }
 .type-dot { background: var(--tc, #7a7166); }
 .dirty-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); flex: none; }
 .list-empty { padding: 14px 10px; font-size: 13px; color: var(--muted); }

@@ -34,7 +34,24 @@ export const LIMITS = Object.freeze({
   importRequestMax: 64 * MiB,
 });
 
-export const PROJECT_TYPES = Object.freeze(['travel', 'story', 'image', 'other']);
+export const PROJECT_TYPES = Object.freeze(['travel', 'story', 'image', 'product', 'other']);
+
+export const DETAIL = Object.freeze({
+  templates: ['basic', 'objection', 'proof', 'scenario', 'story', 'mobile'],
+  langs: ['한국어', '영어', '일본어'],
+  ratios: ['portrait', 'square', 'landscape'],
+  styles: ['미니멀', '모던', '프리미엄', '인스타감성', '내추럴', '테크', '레트로', '팝아트'],
+  modes: ['edit', 'baked'],
+  models: ['none', 'some', 'hero'],
+  sectionTypes: ['hero', 'problem', 'solution', 'feature', 'detail', 'usage', 'comparison', 'review', 'trust', 'spec', 'composition', 'caution', 'offer', 'custom'],
+  roles: ['label', 'headline', 'subcopy', 'bullets', 'text'],
+  weights: [400, 500, 600, 700, 800, 900],
+  fonts: ['sans', 'serif', 'display', 'round'],
+  productAssetsMax: 8,
+  sectionsMax: 16,
+  layersMax: 12,
+  bulletsMax: 8,
+});
 export const CANVAS_SIZES = Object.freeze([
   [1280, 720],
   [1080, 1920],
@@ -63,7 +80,19 @@ export function defaultState() {
       imageLayers: [],
     },
     promptLab: defaultPromptLab(),
+    detailPage: defaultDetailPage(),
     notes: '',
+  };
+}
+
+export function defaultDetailPage() {
+  return {
+    productAssetIds: [],
+    modelAssetId: null,
+    extraInfo: '',
+    reviewSummary: '',
+    settings: { template: 'basic', count: 7, lang: '한국어', ratio: 'portrait', style: '미니멀', mode: 'edit', model: 'none', tone: '' },
+    plan: null,
   };
 }
 
@@ -148,9 +177,142 @@ function checkIdList(value, label, max, allowed) {
   return [...value];
 }
 
+function oneOf(value, list, label) {
+  if (!list.includes(value)) throw bad(`${label} 값이 올바르지 않습니다.`);
+  return value;
+}
+
+function checkHex(value, label) {
+  if (typeof value !== 'string' || !COLOR_RE.test(value)) throw bad(`${label}은(는) #RRGGBB 형식이어야 합니다.`);
+  return value;
+}
+
+function checkBool(value, label) {
+  if (typeof value !== 'boolean') throw bad(`${label} 값은 true/false여야 합니다.`);
+  return value;
+}
+
+function validateDetailPage(dp, anyRef) {
+  if (!isPlainObject(dp)) throw bad('state.detailPage는 객체여야 합니다.');
+  rejectUnknownKeys(dp, ['productAssetIds', 'modelAssetId', 'extraInfo', 'reviewSummary', 'settings', 'plan'], 'state.detailPage');
+  const out = defaultDetailPage();
+  if (dp.productAssetIds !== undefined) {
+    if (!Array.isArray(dp.productAssetIds)) throw bad('상세페이지 제품 이미지 목록은 배열이어야 합니다.');
+    if (dp.productAssetIds.length > DETAIL.productAssetsMax) throw bad(`제품 이미지는 최대 ${DETAIL.productAssetsMax}개까지 등록할 수 있습니다.`);
+    const seen = new Set();
+    out.productAssetIds = dp.productAssetIds.map((id, i) => {
+      const ref = checkAssetRef(id, `제품 이미지 ${i + 1}`, anyRef);
+      if (!ref) throw bad(`제품 이미지 ${i + 1}이(가) 비어 있습니다.`);
+      if (seen.has(ref)) throw bad('같은 제품 이미지가 중복되었습니다.');
+      seen.add(ref);
+      return ref;
+    });
+  }
+  out.modelAssetId = checkAssetRef(dp.modelAssetId, '모델', anyRef);
+  if (dp.extraInfo !== undefined) out.extraInfo = checkString(dp.extraInfo, '추가 정보', { max: 4000 });
+  if (dp.reviewSummary !== undefined) out.reviewSummary = checkString(dp.reviewSummary, '후기 정리', { max: 8000 });
+  if (dp.settings !== undefined) {
+    const s = dp.settings;
+    if (!isPlainObject(s)) throw bad('상세페이지 설정은 객체여야 합니다.');
+    rejectUnknownKeys(s, ['template', 'count', 'lang', 'ratio', 'style', 'mode', 'model', 'tone'], '상세페이지 설정');
+    const o = out.settings;
+    if (s.template !== undefined) o.template = oneOf(s.template, DETAIL.templates, '구성 템플릿');
+    if (s.count !== undefined) o.count = checkNumber(s.count, '섹션 수', { min: 3, max: 12, integer: true });
+    if (s.lang !== undefined) o.lang = oneOf(s.lang, DETAIL.langs, '카피 언어');
+    if (s.ratio !== undefined) o.ratio = oneOf(s.ratio, DETAIL.ratios, '이미지 비율');
+    if (s.style !== undefined) o.style = oneOf(s.style, DETAIL.styles, '스타일');
+    if (s.mode !== undefined) o.mode = oneOf(s.mode, DETAIL.modes, '모드');
+    if (s.model !== undefined) o.model = oneOf(s.model, DETAIL.models, '모델 설정');
+    if (s.tone !== undefined) o.tone = checkString(s.tone, '톤·요청사항', { max: 1000 });
+  }
+  if (dp.plan !== undefined && dp.plan !== null) {
+    const p = dp.plan;
+    if (!isPlainObject(p)) throw bad('상세페이지 구성은 객체여야 합니다.');
+    rejectUnknownKeys(p, ['productName', 'summary', 'palette', 'sections'], '상세페이지 구성');
+    const plan = {
+      productName: p.productName === undefined ? '' : checkString(p.productName, '상품명', { max: 120, allowNewlines: false }),
+      summary: p.summary === undefined ? '' : checkString(p.summary, '제품 요약', { max: 500 }),
+      palette: [],
+      sections: [],
+    };
+    if (p.palette !== undefined) {
+      if (!Array.isArray(p.palette) || p.palette.length > 3) throw bad('색 팔레트는 최대 3개 배열이어야 합니다.');
+      plan.palette = p.palette.map((c, i) => checkHex(c, `팔레트 색 ${i + 1}`));
+    }
+    if (p.sections !== undefined) {
+      if (!Array.isArray(p.sections)) throw bad('섹션 목록은 배열이어야 합니다.');
+      if (p.sections.length > DETAIL.sectionsMax) throw bad(`상세페이지 섹션은 최대 ${DETAIL.sectionsMax}개까지 만들 수 있습니다.`);
+      const seen = new Set();
+      plan.sections = p.sections.map((sec, i) => {
+        const label = `상세 섹션 ${i + 1}`;
+        if (!isPlainObject(sec)) throw bad(`${label}은(는) 객체여야 합니다.`);
+        rejectUnknownKeys(sec, ['id', 'type', 'label', 'headline', 'subcopy', 'bullets', 'visual', 'useModel', 'assetId', 'bg', 'layers'], label);
+        const id = checkId(sec.id, label);
+        if (seen.has(id)) throw bad(`${label}의 id가 중복되었습니다.`);
+        seen.add(id);
+        let bullets = [];
+        if (sec.bullets !== undefined) {
+          if (!Array.isArray(sec.bullets) || sec.bullets.length > DETAIL.bulletsMax) throw bad(`${label} 포인트는 최대 ${DETAIL.bulletsMax}개 배열이어야 합니다.`);
+          bullets = sec.bullets.map((b, k) => checkString(b, `${label} 포인트 ${k + 1}`, { max: 200, allowNewlines: false }));
+        }
+        let layers = [];
+        if (sec.layers !== undefined) {
+          if (!Array.isArray(sec.layers) || sec.layers.length > DETAIL.layersMax) throw bad(`${label} 텍스트 레이어는 최대 ${DETAIL.layersMax}개 배열이어야 합니다.`);
+          const seenL = new Set();
+          layers = sec.layers.map((l, k) => {
+            const ll = `${label} 레이어 ${k + 1}`;
+            if (!isPlainObject(l)) throw bad(`${ll}은(는) 객체여야 합니다.`);
+            rejectUnknownKeys(l, ['id', 'role', 'text', 'visible', 'x', 'y', 'size', 'weight', 'font', 'color', 'align', 'lineHeight', 'maxW', 'shadow', 'bg', 'bgColor', 'bgOpacity'], ll);
+            const lid = checkId(l.id, ll);
+            if (seenL.has(lid)) throw bad(`${ll}의 id가 중복되었습니다.`);
+            seenL.add(lid);
+            return {
+              id: lid,
+              role: l.role === undefined ? 'text' : oneOf(l.role, DETAIL.roles, `${ll} 역할`),
+              text: l.text === undefined ? '' : checkString(l.text, `${ll} 문구`, { max: 2000 }),
+              visible: l.visible === undefined ? true : checkBool(l.visible, `${ll} 표시`),
+              x: l.x === undefined ? 0.5 : checkNumber(l.x, `${ll} x`, { min: 0, max: 1 }),
+              y: l.y === undefined ? 0.1 : checkNumber(l.y, `${ll} y`, { min: -0.1, max: 1.2 }),
+              size: l.size === undefined ? 40 : checkNumber(l.size, `${ll} 크기`, { min: 10, max: 240 }),
+              weight: l.weight === undefined ? 700 : oneOf(l.weight, DETAIL.weights, `${ll} 굵기`),
+              font: l.font === undefined ? 'sans' : oneOf(l.font, DETAIL.fonts, `${ll} 폰트`),
+              color: l.color === undefined ? '#16181d' : checkHex(l.color, `${ll} 글자색`),
+              align: l.align === undefined ? 'center' : oneOf(l.align, ['left', 'center', 'right'], `${ll} 정렬`),
+              lineHeight: l.lineHeight === undefined ? 1.35 : checkNumber(l.lineHeight, `${ll} 줄 간격`, { min: 0.8, max: 3 }),
+              maxW: l.maxW === undefined ? 0.86 : checkNumber(l.maxW, `${ll} 폭`, { min: 0.1, max: 1 }),
+              shadow: l.shadow === undefined ? false : checkBool(l.shadow, `${ll} 그림자`),
+              bg: l.bg === undefined ? false : checkBool(l.bg, `${ll} 배경 사각형`),
+              bgColor: l.bgColor === undefined ? '#ffffff' : checkHex(l.bgColor, `${ll} 배경색`),
+              bgOpacity: l.bgOpacity === undefined ? 0.85 : checkNumber(l.bgOpacity, `${ll} 배경 투명도`, { min: 0, max: 1 }),
+            };
+          });
+        }
+        return {
+          id,
+          type: sec.type === undefined ? 'custom' : oneOf(sec.type, DETAIL.sectionTypes, `${label} 종류`),
+          label: sec.label === undefined ? '' : checkString(sec.label, `${label} 역할`, { max: 40, allowNewlines: false }),
+          headline: sec.headline === undefined ? '' : checkString(sec.headline, `${label} 헤드라인`, { max: 200 }),
+          subcopy: sec.subcopy === undefined ? '' : checkString(sec.subcopy, `${label} 서브카피`, { max: 1000 }),
+          bullets,
+          visual: sec.visual === undefined ? '' : checkString(sec.visual, `${label} 장면 묘사`, { max: 2000 }),
+          useModel: sec.useModel === undefined ? false : checkBool(sec.useModel, `${label} 모델 사용`),
+          assetId: checkAssetRef(sec.assetId, label, anyRef),
+          bg: sec.bg === undefined ? '#efece6' : checkHex(sec.bg, `${label} 배경색`),
+          layers,
+        };
+      });
+    }
+    out.plan = plan;
+  }
+  return out;
+}
+
 /** Every asset id referenced by a (validated) state. */
 export function collectAssetRefs(state) {
   const refs = [];
+  for (const id of state.detailPage.productAssetIds) refs.push(id);
+  if (state.detailPage.modelAssetId) refs.push(state.detailPage.modelAssetId);
+  if (state.detailPage.plan) for (const s of state.detailPage.plan.sections) if (s.assetId) refs.push(s.assetId);
   if (state.editor.baseAssetId) refs.push(state.editor.baseAssetId);
   for (const l of state.editor.imageLayers) refs.push(l.assetId);
   for (const c of state.story.characters) if (c.assetId) refs.push(c.assetId);
@@ -166,6 +328,10 @@ export function remapAssetRefs(state, map) {
     .filter((l) => l.assetId);
   for (const c of state.story.characters) if (c.assetId) c.assetId = map(c.assetId) ?? null;
   for (const s of state.story.scenes) if (s.assetId) s.assetId = map(s.assetId) ?? null;
+  const dp = state.detailPage;
+  dp.productAssetIds = dp.productAssetIds.map((id) => map(id) ?? null).filter(Boolean);
+  if (dp.modelAssetId) dp.modelAssetId = map(dp.modelAssetId) ?? null;
+  if (dp.plan) for (const s of dp.plan.sections) if (s.assetId) s.assetId = map(s.assetId) ?? null;
   return state;
 }
 
@@ -246,7 +412,7 @@ export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
   if (bytes > LIMITS.stateBytesMax) {
     throw new HttpError(413, `프로젝트 상태 데이터가 256KiB를 초과했습니다.`, 'STATE_TOO_LARGE');
   }
-  rejectUnknownKeys(input, ['story', 'editor', 'promptLab', 'notes'], 'state');
+  rejectUnknownKeys(input, ['story', 'editor', 'promptLab', 'detailPage', 'notes'], 'state');
   const out = defaultState();
   const anyRef = allowAnyBaseAssetId;
 
@@ -433,6 +599,7 @@ export function validateState(input, { allowAnyBaseAssetId = false } = {}) {
     out.promptLab.characterIds = checkIdList(pl.characterIds, '프롬프트 등장인물', LIMITS.charactersMax, new Set(out.story.characters.map((c) => c.id)));
   }
 
+  if (input.detailPage !== undefined) out.detailPage = validateDetailPage(input.detailPage, anyRef);
   if (input.notes !== undefined) out.notes = checkString(input.notes, '메모', { max: LIMITS.notesMax });
   return out;
 }

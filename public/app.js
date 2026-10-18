@@ -6,8 +6,9 @@ import { renderStory, MAX_SCRIPT, MAX_SCENES } from './story.js';
 import { renderEditor, makeLayer, forgetImage, RATIOS, MAX_LAYERS, MAX_IMAGE_LAYERS } from './canvas-editor.js';
 import { renderPromptLab } from './promptlab.js';
 import { openSketchPad } from './sketch.js';
+import { renderDetailPage } from './detail-page.js';
 
-const TYPE_LABELS = { travel: '여행', story: '이야기', image: '이미지', other: '기타' };
+const TYPE_LABELS = { travel: '여행', story: '이야기', image: '이미지', product: '상세페이지', other: '기타' };
 const TYPES = Object.keys(TYPE_LABELS);
 const ALLOWED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
 const MAX_UPLOAD = 10 * 1024 * 1024;
@@ -18,7 +19,24 @@ const DEFAULT_STATE = {
   story: { script: '', scenes: [], characters: [] },
   editor: { width: 1280, height: 720, background: '#e8e3d8', baseAssetId: null, fit: 'cover', textLayers: [], imageLayers: [] },
   promptLab: { picks: {}, subject: '', negative: '', ratio: '16:9', depth: 'auto', seed: null, characterIds: [] },
+  detailPage: {
+    productAssetIds: [], modelAssetId: null, extraInfo: '', reviewSummary: '',
+    settings: { template: 'basic', count: 7, lang: '한국어', ratio: 'portrait', style: '미니멀', mode: 'edit', model: 'none', tone: '' },
+    plan: null,
+  },
   notes: '',
+};
+const DP = {
+  templates: ['basic', 'objection', 'proof', 'scenario', 'story', 'mobile'],
+  langs: ['한국어', '영어', '일본어'],
+  ratios: ['portrait', 'square', 'landscape'],
+  styles: ['미니멀', '모던', '프리미엄', '인스타감성', '내추럴', '테크', '레트로', '팝아트'],
+  modes: ['edit', 'baked'],
+  models: ['none', 'some', 'hero'],
+  types: ['hero', 'problem', 'solution', 'feature', 'detail', 'usage', 'comparison', 'review', 'trust', 'spec', 'composition', 'caution', 'offer', 'custom'],
+  roles: ['label', 'headline', 'subcopy', 'bullets', 'text'],
+  weights: [400, 500, 600, 700, 800, 900],
+  fonts: ['sans', 'serif', 'display', 'round'],
 };
 const MAX_CHARACTERS = 12;
 const PROMPT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3', '3:2'];
@@ -27,6 +45,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const TABS = [
   { id: 'story', label: '대본·장면', icon: 'pen' },
   { id: 'image', label: '이미지·썸네일', icon: 'image' },
+  { id: 'detail', label: '상세페이지', icon: 'layers' },
   { id: 'prompt', label: '프롬프트·AI', icon: 'leaf' },
   { id: 'assets', label: '자료', icon: 'folder' },
   { id: 'info', label: '정보·메모', icon: 'note' },
@@ -253,8 +272,83 @@ function normalizeState(raw) {
     seed: pl.seed !== null && pl.seed !== undefined && Number.isInteger(seed) && seed >= 0 && seed <= 2147483647 ? seed : null,
     characterIds: charIds(pl.characterIds),
   };
+  out.detailPage = normalizeDetailPage(src.detailPage, assetRef);
   out.notes = str(src.notes);
   return out;
+}
+
+function normalizeDetailPage(raw, assetRef) {
+  const base = deepClone(DEFAULT_STATE.detailPage);
+  const dp = raw && typeof raw === 'object' ? raw : {};
+  const pick = (v, list, d) => (list.includes(v) ? v : d);
+  const clampN = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+  const oneLine = (v, max) => str(v, max).replace(/[\r\n\t]+/g, ' ');
+  const hex = (v, d) => (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : d);
+  base.productAssetIds = [...new Set((Array.isArray(dp.productAssetIds) ? dp.productAssetIds : []).map(assetRef).filter(Boolean))].slice(0, 8);
+  base.modelAssetId = assetRef(dp.modelAssetId);
+  base.extraInfo = str(dp.extraInfo, 4000);
+  base.reviewSummary = str(dp.reviewSummary, 8000);
+  const s = dp.settings && typeof dp.settings === 'object' ? dp.settings : {};
+  base.settings = {
+    template: pick(s.template, DP.templates, 'basic'),
+    count: Math.round(clampN(s.count, 3, 12, 7)),
+    lang: pick(s.lang, DP.langs, '한국어'),
+    ratio: pick(s.ratio, DP.ratios, 'portrait'),
+    style: pick(s.style, DP.styles, '미니멀'),
+    mode: pick(s.mode, DP.modes, 'edit'),
+    model: pick(s.model, DP.models, 'none'),
+    tone: str(s.tone, 1000),
+  };
+  const p = dp.plan && typeof dp.plan === 'object' ? dp.plan : null;
+  if (p) {
+    const seen = new Set();
+    base.plan = {
+      productName: oneLine(p.productName, 120),
+      summary: str(p.summary, 500),
+      palette: (Array.isArray(p.palette) ? p.palette : []).map((c) => hex(c, null)).filter(Boolean).slice(0, 3),
+      sections: (Array.isArray(p.sections) ? p.sections : []).filter((x) => x && typeof x === 'object').slice(0, 16).map((sec) => {
+        let id = typeof sec.id === 'string' && ID_RE.test(sec.id) && !seen.has(sec.id) ? sec.id : uid('sec');
+        seen.add(id);
+        const seenL = new Set();
+        return {
+          id,
+          type: pick(sec.type, DP.types, 'custom'),
+          label: oneLine(sec.label, 40),
+          headline: str(sec.headline, 200),
+          subcopy: str(sec.subcopy, 1000),
+          bullets: (Array.isArray(sec.bullets) ? sec.bullets : []).map((b) => oneLine(b, 200)).filter((b) => b.trim()).slice(0, 8),
+          visual: str(sec.visual, 2000),
+          useModel: !!sec.useModel,
+          assetId: assetRef(sec.assetId),
+          bg: hex(sec.bg, '#efece6'),
+          layers: (Array.isArray(sec.layers) ? sec.layers : []).filter((l) => l && typeof l === 'object').slice(0, 12).map((l) => {
+            const lid = typeof l.id === 'string' && ID_RE.test(l.id) && !seenL.has(l.id) ? l.id : uid('lay');
+            seenL.add(lid);
+            return {
+              id: lid,
+              role: pick(l.role, DP.roles, 'text'),
+              text: str(l.text, 2000),
+              visible: l.visible === undefined ? true : !!l.visible,
+              x: clampN(l.x, 0, 1, 0.5),
+              y: clampN(l.y, -0.1, 1.2, 0.1),
+              size: clampN(l.size, 10, 240, 40),
+              weight: DP.weights.includes(Number(l.weight)) ? Number(l.weight) : 700,
+              font: pick(l.font, DP.fonts, 'sans'),
+              color: hex(l.color, '#16181d'),
+              align: pick(l.align, ['left', 'center', 'right'], 'center'),
+              lineHeight: clampN(l.lineHeight, 0.8, 3, 1.35),
+              maxW: clampN(l.maxW, 0.1, 1, 0.86),
+              shadow: !!l.shadow,
+              bg: !!l.bg,
+              bgColor: hex(l.bgColor, '#ffffff'),
+              bgOpacity: clampN(l.bgOpacity, 0, 1, 0.85),
+            };
+          }),
+        };
+      }),
+    };
+  }
+  return base;
 }
 
 function validateDraft(d) {
@@ -828,12 +922,15 @@ async function saveAsCopy(cur) {
     state.editor.imageLayers = [];
     for (const c of state.story.characters) c.assetId = null;
     for (const s of state.story.scenes) s.assetId = null;
+    state.detailPage.productAssetIds = [];
+    state.detailPage.modelAssetId = null;
+    if (state.detailPage.plan) for (const s of state.detailPage.plan.sections) s.assetId = null;
     const saved = (await studioApi.patchProject(created.id, { version: created.version, state })).project;
     updateProjectInList(saved);
     S.cur = makeCur(saved);
     S.cur.savedAt = new Date();
     S.assets = [];
-    S.tab = 'story';
+    S.tab = saved.type === 'product' ? 'detail' : 'story';
     setHash(saved.id);
     renderMain();
     renderProjectList();
@@ -877,7 +974,7 @@ async function openProject(id, { fromHash = false } = {}) {
     const [p, a] = await Promise.all([studioApi.getProject(id), studioApi.listAssets(id)]);
     S.cur = makeCur(p.project);
     S.assets = Array.isArray(a.assets) ? a.assets : [];
-    S.tab = 'story';
+    S.tab = p.project.type === 'product' ? 'detail' : 'story';
     setHash(id);
   } catch (err) {
     S.cur = null;
@@ -1098,6 +1195,11 @@ function assetUsage(state, assetId) {
   if (chars) out.push(`등장인물 ${chars}명`);
   const scenes = state.story.scenes.filter((s) => s.assetId === assetId).length;
   if (scenes) out.push(`장면 ${scenes}개`);
+  const dp = state.detailPage;
+  if (dp.productAssetIds.includes(assetId)) out.push('상세페이지 제품 이미지');
+  if (dp.modelAssetId === assetId) out.push('상세페이지 모델');
+  const dsec = dp.plan ? dp.plan.sections.filter((s) => s.assetId === assetId).length : 0;
+  if (dsec) out.push(`상세 섹션 ${dsec}개`);
   return out;
 }
 
@@ -1109,6 +1211,10 @@ function clearAssetRefs(state, assetId) {
   if (state.editor.imageLayers.length !== before) changed = true;
   for (const c of state.story.characters) if (c.assetId === assetId) { c.assetId = null; changed = true; }
   for (const s of state.story.scenes) if (s.assetId === assetId) { s.assetId = null; changed = true; }
+  const dp = state.detailPage;
+  if (dp.productAssetIds.includes(assetId)) { dp.productAssetIds = dp.productAssetIds.filter((id) => id !== assetId); changed = true; }
+  if (dp.modelAssetId === assetId) { dp.modelAssetId = null; changed = true; }
+  if (dp.plan) for (const s of dp.plan.sections) if (s.assetId === assetId) { s.assetId = null; changed = true; }
   return changed;
 }
 
@@ -1412,6 +1518,11 @@ function renderTab() {
       confirm: confirmDialog,
       projectTitle: () => S.cur.draft.title,
     });
+  } else if (S.tab === 'detail') {
+    renderDetailPage(panel, {
+      getState, markDirty, notify, aiBlocked, confirm: confirmDialog,
+      getAssets: () => S.assets, uploadFiles, projectTitle: () => S.cur.draft.title, switchTab,
+    });
   } else if (S.tab === 'prompt') {
     renderPromptLab(panel, { getState, markDirty, notify, aiBlocked, confirm: confirmDialog, switchTab });
   } else if (S.tab === 'assets') {
@@ -1478,7 +1589,7 @@ function renderHome() {
           h('li', null, h('span', { class: 'fact-k' }, '저장'), h('span', null, '이 컴퓨터에서 실행 중인 로컬 서버에 보관')),
           h('li', null, h('span', { class: 'fact-k' }, '다른 기기'), h('span', null, '아직 연결 안 됨 · 백업 파일로 옮기기 가능')),
           h('li', null, h('span', { class: 'fact-k' }, 'AI'), h('span', null, ai ? '서버 설정 감지 · 화면 기능은 아직 없음' : 'AI 미연결 · 유료 호출 없음')),
-          h('li', null, h('span', { class: 'fact-k' }, '직접 가능'), h('span', null, '대본 편집, 로컬 장면 분할, 이미지 자료, 썸네일 PNG')),
+          h('li', null, h('span', { class: 'fact-k' }, '직접 가능'), h('span', null, '대본·스토리보드, 프롬프트 작업대, 이미지 합성·스케치, 상세페이지 PNG·ZIP')),
         ),
         h('button', { type: 'button', class: 'btn btn-quiet btn-sm', onclick: openSettings }, icon('settings', 'icon-sm'), h('span', null, '자세히 보기')),
       ),

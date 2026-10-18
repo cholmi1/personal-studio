@@ -308,6 +308,7 @@ test('projects: CRUD, validation, version conflict, size limits', async () => {
     story: { script: '', scenes: [], characters: [] },
     editor: { width: 1280, height: 720, background: '#e8e3d8', baseAssetId: null, fit: 'cover', textLayers: [], imageLayers: [] },
     promptLab: { picks: {}, subject: '', negative: '', ratio: '16:9', depth: 'auto', seed: null, characterIds: [] },
+    detailPage: { productAssetIds: [], modelAssetId: null, extraInfo: '', reviewSummary: '', settings: { template: 'basic', count: 7, lang: '한국어', ratio: 'portrait', style: '미니멀', mode: 'edit', model: 'none', tone: '' }, plan: null },
     notes: '',
   });
   for (const k of ['id', 'title', 'description', 'type', 'version', 'createdAt', 'updatedAt', 'state']) assert.ok(k in p, k);
@@ -339,6 +340,22 @@ test('projects: CRUD, validation, version conflict, size limits', async () => {
       imageLayers: [],
     },
     promptLab: { picks: { style: ['photo'], light: ['golden'] }, subject: '바닷가 산책', negative: 'blurry', ratio: '9:16', depth: 'blur', seed: 1234, characterIds: ['c1'] },
+    detailPage: {
+      productAssetIds: [],
+      modelAssetId: null,
+      extraInfo: '상품명 촉촉 선크림',
+      reviewSummary: '후기 12개',
+      settings: { template: 'story', count: 5, lang: '영어', ratio: 'square', style: '프리미엄', mode: 'baked', model: 'hero', tone: '과장 금지' },
+      plan: {
+        productName: '촉촉 선크림',
+        summary: '가벼운 선크림',
+        palette: ['#efece6', '#ffffff', '#16181d'],
+        sections: [{
+          id: 'd1', type: 'hero', label: '히어로', headline: '여름 필수', subcopy: '가볍게', bullets: ['SPF50+'], visual: 'beach', useModel: true, assetId: null, bg: '#efece6',
+          layers: [{ id: 'l1', role: 'headline', text: '여름 필수', visible: true, x: 0.5, y: 0.1, size: 78, weight: 800, font: 'display', color: '#16181d', align: 'center', lineHeight: 1.22, maxW: 0.86, shadow: false, bg: true, bgColor: '#ffffff', bgOpacity: 0.85 }],
+        }],
+      },
+    },
     notes: '메모',
   };
   r = await client.patch(`/api/projects/${p.id}`, { version: 1, title: '제주 가을 여행', state });
@@ -380,6 +397,16 @@ test('projects: CRUD, validation, version conflict, size limits', async () => {
     { promptLab: { seed: 1.5 } },
     { promptLab: { picks: { 'bad key!': ['x'] } } },
     { promptLab: { characterIds: ['nobody'] } },
+    { detailPage: { settings: { template: 'weird' } } },
+    { detailPage: { settings: { count: 99 } } },
+    { detailPage: { productAssetIds: Array.from({ length: 9 }, () => '00000000-0000-4000-8000-000000000000') } },
+    { detailPage: { productAssetIds: ['../x'] } },
+    { detailPage: { plan: { sections: [{ id: 'a', type: 'nope' }] } } },
+    { detailPage: { plan: { sections: [{ id: 'a', layers: [{ id: 'l', weight: 650 }] }] } } },
+    { detailPage: { plan: { sections: [{ id: 'a', layers: [{ id: 'l', font: 'Comic' }] }] } } },
+    { detailPage: { plan: { sections: Array.from({ length: 17 }, (_, i) => ({ id: `s${i}` })) } } },
+    { detailPage: { plan: { palette: ['red'] } } },
+    { detailPage: { unknown: 1 } },
   ];
   for (const s of badStates) {
     r = await client.patch(`/api/projects/${p.id}`, { version: 2, state: s });
@@ -524,6 +551,7 @@ test('export/import: self-contained backup, id remap, validation, rollback', asy
       characters: [{ id: 'c1', name: '주인공', look: '', assetId: charAssetId }],
     },
     editor: { baseAssetId: oldAssetId, width: 1440, height: 1080, imageLayers: [{ id: 'i1', assetId: charAssetId, x: 10, y: 20, w: 300, h: 200, opacity: 0.5 }] },
+    detailPage: { productAssetIds: [oldAssetId, charAssetId], modelAssetId: charAssetId, plan: { sections: [{ id: 'd1', assetId: oldAssetId }] } },
   };
   assert.equal((await client.patch(`/api/projects/${pid}`, { version: 1, state: st })).status, 200);
 
@@ -568,6 +596,10 @@ test('export/import: self-contained backup, id remap, validation, rollback', asy
   assert.ok(newIds.has(ist.editor.imageLayers[0].assetId) && ist.editor.imageLayers[0].assetId !== charAssetId, 'image layer remapped');
   assert.equal(ist.story.scenes[0].assetId, newBase);
   assert.deepEqual(ist.story.scenes[0].characterIds, ['c1']);
+  assert.equal(ist.detailPage.productAssetIds.length, 2);
+  assert.ok(ist.detailPage.productAssetIds.every((id) => newIds.has(id)), 'detail product assets remapped');
+  assert.ok(newIds.has(ist.detailPage.modelAssetId), 'detail model remapped');
+  assert.equal(ist.detailPage.plan.sections[0].assetId, newBase, 'detail section asset remapped');
   assert.equal(ist.story.script, st.story.script);
 
   const projectCount = async () => (await client.get('/api/projects')).data.projects.length;
@@ -582,6 +614,7 @@ test('export/import: self-contained backup, id remap, validation, rollback', asy
     { ...backup, assets: [backup.assets[0], { ...backup.assets[0] }] },
     { ...backup, project: { ...backup.project, state: { editor: { baseAssetId: 'missing-id' } } } },
     { ...backup, project: { ...backup.project, state: { ...backup.project.state, story: { ...backup.project.state.story, scenes: [{ id: 'z', assetId: 'missing-id' }] } } } },
+    { ...backup, project: { ...backup.project, state: { ...backup.project.state, detailPage: { productAssetIds: ['missing-id'] } } } },
     { ...backup, project: { ...backup.project, title: '' } },
     { ...backup, account: { email: 'x' } },
   ];
